@@ -14,6 +14,10 @@ impl FunctionDefinitions {
         }
         targets
             .iter()
+            // A loop binder is no carried function value, though a local of its
+            // name may exist (MLS §11.2.2: the binder shadows it; MSL IF97
+            // `cond_dTp` declares `Integer i, j` and loops `for i`, `for j`).
+            .filter(|name| !context.loop_binders.contains(*name))
             .filter(|name| {
                 self.require_named_readable((&self.folds, &[]), name, &[], context, span)
                     .is_ok()

@@ -146,9 +146,26 @@ impl FallibleExpressionVisitor for DefinedValueReadChecker<'_> {
         for index in indices.iter().rev() {
             self.visit_expression(&index.range)?;
         }
-        let Some(points) = comprehension_points(indices, self.context) else {
-            self.visit_expression(expr)?;
-            return filter.map_or(Ok(()), |filter| self.visit_expression(filter));
+        // MLS §10.4.2: an iterator shadows every outer value of its name inside
+        // the comprehension, and holds a value at every point, like a loop binder
+        // (`sum(a[i] for i in 1:4)` in a function that also declares `Integer i`,
+        // MSL IF97 `cond_dTp`)
+        let mut binders = self.context.loop_binders.clone();
+        binders.extend(indices.iter().map(|index| VarName::new(&index.name)));
+        let context = FunctionValidationContext {
+            loop_binders: &binders,
+            ..self.context
+        };
+        let Some(points) = comprehension_points(indices, context) else {
+            let mut checker = DefinedValueReadChecker {
+                definitions: self.definitions,
+                folds: std::borrow::Cow::Borrowed(&self.folds),
+                selected_by: self.selected_by.clone(),
+                context,
+                span: self.span,
+            };
+            checker.visit_expression(expr)?;
+            return filter.map_or(Ok(()), |filter| checker.visit_expression(filter));
         };
         for point in points {
             let mut checker = DefinedValueReadChecker {
@@ -157,7 +174,7 @@ impl FallibleExpressionVisitor for DefinedValueReadChecker<'_> {
                 selected_by: self.selected_by.clone(),
                 context: FunctionValidationContext {
                     comprehension_values: Some(&point),
-                    ..self.context
+                    ..context
                 },
                 span: self.span,
             };
