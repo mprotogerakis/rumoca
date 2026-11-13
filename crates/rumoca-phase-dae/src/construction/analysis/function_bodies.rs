@@ -35,8 +35,118 @@ pub(in crate::construction) fn validate_function_certificate(
     certificate: &FunctionShapeCertificate,
 ) -> Result<FunctionPlan, ToDaeError> {
     let function = &flat.functions[&certificate.key.function];
-    certify_function(function, flat, shapes, certificate)
-        .map_err(|error| error.within_function(function.name.as_str()))
+    match certify_function(function, flat, shapes, certificate) {
+        Err(error) if is_unbounded_while(&error) => {
+            let mut bounded = function.clone();
+            bounded.body = bound_while_loops(&function.body, &mut 0);
+            certify_function(&bounded, flat, shapes, certificate)
+        }
+        result => result,
+    }
+    .map_err(|error| error.within_function(function.name.as_str()))
+}
+
+/// nomosim: MSL compatibility. Rumoca lowers a function body to a result DAG,
+/// so a `while` loop needs a translation-time iteration bound; MSL's
+/// `Math.Nonlinear.solveOneNonlinearEquation` (Brent; MoistAir and table-based
+/// media invert with it) loops `while not found`. A function refused for such a
+/// loop is planned again with each `while c loop s end while` as
+/// `for k in 1:WHILE_BOUND loop if c then s end if; end for; assert(not c, ..)`,
+/// the form loop compaction gives a bounded one: the same iterations, and an
+/// error past the bound.
+const WHILE_BOUND: i64 = 10_000;
+
+fn is_unbounded_while(error: &ToDaeError) -> bool {
+    matches!(error, ToDaeError::UnsupportedFlatSemantics { feature, detail, .. }
+        if feature == "function loop domain" && detail.starts_with("a `while` loop"))
+}
+
+fn bound_while_loops(
+    statements: &[rumoca_core::Statement],
+    count: &mut usize,
+) -> Vec<rumoca_core::Statement> {
+    use rumoca_core::{Expression, Statement, StatementBlock};
+    let mut bounded = Vec::with_capacity(statements.len());
+    for statement in statements {
+        match statement {
+            Statement::While { block, span } => {
+                *count += 1;
+                let span = *span;
+                let integer = |value| Expression::Literal {
+                    value: rumoca_core::Literal::Integer(value),
+                    span,
+                };
+                let not = || Expression::Unary {
+                    op: rumoca_core::OpUnary::Not,
+                    rhs: Box::new(block.cond.clone()),
+                    span,
+                };
+                // the form loop compaction gives a bounded `while` (its early
+                // exit ends the fold once `c` is false)
+                let body = vec![Statement::If {
+                    cond_blocks: vec![StatementBlock {
+                        cond: block.cond.clone(),
+                        stmts: bound_while_loops(&block.stmts, count),
+                    }],
+                    else_block: None,
+                    span,
+                }];
+                bounded.push(Statement::For {
+                    indices: vec![rumoca_core::ForIndex {
+                        binder: rumoca_core::IndexBinderProvenance::Generated,
+                        ident: format!("nomosim__while{count}"),
+                        range: Expression::Range {
+                            start: Box::new(integer(1)),
+                            step: None,
+                            end: Box::new(integer(WHILE_BOUND)),
+                            span,
+                        },
+                    }],
+                    equations: body,
+                    span,
+                });
+                bounded.push(Statement::Assert {
+                    condition: not(),
+                    message: Box::new(Expression::Literal {
+                        value: rumoca_core::Literal::String(format!(
+                            "a while loop did not finish within {WHILE_BOUND} iterations"
+                        )),
+                        span,
+                    }),
+                    level: None,
+                    span,
+                });
+            }
+            Statement::For {
+                indices,
+                equations,
+                span,
+            } => bounded.push(Statement::For {
+                indices: indices.clone(),
+                equations: bound_while_loops(equations, count),
+                span: *span,
+            }),
+            Statement::If {
+                cond_blocks,
+                else_block,
+                span,
+            } => bounded.push(Statement::If {
+                cond_blocks: cond_blocks
+                    .iter()
+                    .map(|block| StatementBlock {
+                        cond: block.cond.clone(),
+                        stmts: bound_while_loops(&block.stmts, count),
+                    })
+                    .collect(),
+                else_block: else_block
+                    .as_ref()
+                    .map(|statements| bound_while_loops(statements, count)),
+                span: *span,
+            }),
+            other => bounded.push(other.clone()),
+        }
+    }
+    bounded
 }
 
 fn certify_function(
@@ -141,9 +251,87 @@ fn validate_external_body(
     )?))
 }
 
+/// nomosim: MSL compatibility. MLS §12.4.4 makes it an error to use an
+/// uninitialized function value on the executed path; Rumoca proves that
+/// statically, or checks it at run time for a top-level read. MSL code that
+/// Dymola and OpenModelica run leaves values unassigned on paths that never
+/// read them, in ways that neither proof sees: IF97 `boilingcurve_p` returns
+/// `bpro` with `bpro.cv` unset on one branch (read by no caller there), and
+/// MoistAir `spliceFunction_der` reads `scaledXt` under a second condition
+/// equivalent to the branch that set it. Such a value starts from its zero seed
+/// at entry: a run-time checked read keeps its plan and only gains the seed; a
+/// read the analysis refuses (or an output a loop defines once converged) is
+/// analysed again with the value defined from entry. Every other function is
+/// planned exactly as before.
 fn validate_statement_function(
     function: &rumoca_core::Function,
     context: FunctionValidationContext<'_>,
+) -> Result<FunctionPlan, ToDaeError> {
+    let mut predefined = Vec::new();
+    loop {
+        let result = validate_statement_function_with(function, context, &predefined);
+        let more = match &result {
+            Err(ToDaeError::UnsupportedFlatSemantics {
+                feature, detail, ..
+            }) if feature == "function conditional" || feature == "function output definition" => {
+                branch_partial_read(detail)
+                    .filter(|name| !predefined.contains(name))
+                    .into_iter()
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if more.is_empty() || predefined.len() > 256 {
+            return result;
+        }
+        predefined.extend(more);
+        predefined.sort();
+        predefined.dedup();
+    }
+}
+
+/// The value a "reads `x`, which only some branches ... define" or a "returns
+/// `x` without defining every declared element" refusal names (the latter: an
+/// output a loop defines once it has converged, `u` of Brent's solver).
+fn branch_partial_read(detail: &str) -> Option<VarName> {
+    if let Some((_, rest)) = detail.split_once("` reads `") {
+        let (name, rest) = rest.split_once('`')?;
+        return rest.starts_with(", which only some branches").then(|| VarName::new(name));
+    }
+    let (_, rest) = detail.split_once("` returns `")?;
+    let (name, rest) = rest.split_once('`')?;
+    rest.starts_with(" without defining").then(|| VarName::new(name))
+}
+
+/// The seed of `name`: its own, or its field's in the seed of the record it
+/// was split from (`bpro__cv` of `bpro`).
+fn predefined_seed(
+    name: &VarName,
+    definitions: &FunctionDefinitions,
+    context: FunctionValidationContext<'_>,
+    span: Span,
+) -> Option<FunctionValueSeed> {
+    definitions.whole_loop_seed(name, context, span).ok().or_else(|| {
+        let (parent, field) = name.as_str().rsplit_once("__")?;
+        match definitions
+            .whole_loop_seed(&VarName::new(parent), context, span)
+            .ok()?
+        {
+            FunctionValueSeed::Record {
+                dimensions, fields, ..
+            } if dimensions.is_empty() => fields
+                .into_iter()
+                .find(|(candidate, _)| candidate.as_str() == field)
+                .map(|(_, seed)| seed),
+            _ => None,
+        }
+    })
+}
+
+fn validate_statement_function_with(
+    function: &rumoca_core::Function,
+    context: FunctionValidationContext<'_>,
+    predefined: &[VarName],
 ) -> Result<FunctionPlan, ToDaeError> {
     let normalized = normalize_function_source(function, &function.body, context, true)?;
     let roles = roles_with_guards(context.roles, &normalized.guards);
@@ -165,6 +353,15 @@ fn validate_statement_function(
         &mut definitions,
     )?;
     entry_seeds.extend(definitions.empty_value_seeds(normalized_context)?);
+    for name in predefined {
+        if definitions.is_defined(name) || entry_seeds.iter().any(|(seeded, _)| seeded == name) {
+            continue;
+        }
+        if let Some(seed) = predefined_seed(name, &definitions, normalized_context, function.span) {
+            definitions.define_whole(name);
+            entry_seeds.push((name.clone(), seed));
+        }
+    }
     let (statements, definedness) = validate_top_level_statements(
         function,
         &normalized.statements,
@@ -172,6 +369,20 @@ fn validate_statement_function(
         &mut definitions,
     )?;
     require_total_outputs(function, &definitions)?;
+    // A value read where only some paths assigned it is checked at run time
+    // (MLS §12.4.4); it starts from its zero seed instead, after the analysis,
+    // which keeps its plan (IF97 `boilingcurve_p`: `bpro.cv`).
+    let mut partial = definedness.asserted_reads.values().flatten().collect::<Vec<_>>();
+    partial.sort();
+    partial.dedup();
+    for name in partial {
+        if entry_seeds.iter().any(|(seeded, _)| seeded == name) {
+            continue;
+        }
+        if let Some(seed) = predefined_seed(name, &definitions, normalized_context, function.span) {
+            entry_seeds.push((name.clone(), seed));
+        }
+    }
     Ok(FunctionPlan::Statements {
         statements,
         generated_booleans: normalized
@@ -824,6 +1035,28 @@ pub(in crate::construction) fn function_assertion<'statement>(
             level: function_assertion_level(level.as_deref(), *span)?,
             span: *span,
         })),
+        // nomosim: MSL's `Modelica.Utilities.Streams.error(message)` (external
+        // ModelicaError) as a statement is `assert(false, message)`
+        rumoca_core::Statement::FunctionCall {
+            comp,
+            args,
+            outputs,
+            span,
+        } if outputs.iter().all(Option::is_none)
+            && args.len() == 1
+            && (comp.as_str() == "error" || comp.as_str().ends_with("Streams.error")) =>
+        {
+            let condition: &'statement Expression = Box::leak(Box::new(Expression::Literal {
+                value: rumoca_core::Literal::Boolean(false),
+                span: *span,
+            }));
+            Ok(Some(FunctionAssertion {
+                condition,
+                message: &args[0],
+                level: dae::AssertionLevel::Error,
+                span: *span,
+            }))
+        }
         rumoca_core::Statement::FunctionCall {
             comp,
             args,
