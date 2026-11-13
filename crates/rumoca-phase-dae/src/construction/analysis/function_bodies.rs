@@ -141,9 +141,87 @@ fn validate_external_body(
     )?))
 }
 
+/// nomosim: MSL compatibility. MLS §12.4.4 makes it an error to use an
+/// uninitialized function value on the executed path; Rumoca proves that
+/// statically, or checks it at run time for a top-level read. MSL code that
+/// Dymola and OpenModelica run leaves values unassigned on paths that never
+/// read them, in ways that neither proof sees: IF97 `boilingcurve_p` returns
+/// `bpro` with `bpro.cv` unset on one branch (read by no caller there), and
+/// MoistAir `spliceFunction_der` reads `scaledXt` under a second condition
+/// equivalent to the branch that set it. Such a value starts from its zero seed
+/// at entry: a run-time checked read keeps its plan and only gains the seed; a
+/// read the analysis refuses (or an output a loop defines once converged) is
+/// analysed again with the value defined from entry. Every other function is
+/// planned exactly as before.
 fn validate_statement_function(
     function: &rumoca_core::Function,
     context: FunctionValidationContext<'_>,
+) -> Result<FunctionPlan, ToDaeError> {
+    let mut predefined = Vec::new();
+    loop {
+        let result = validate_statement_function_with(function, context, &predefined);
+        let more = match &result {
+            Err(ToDaeError::UnsupportedFlatSemantics {
+                feature, detail, ..
+            }) if feature == "function conditional" || feature == "function output definition" => {
+                branch_partial_read(detail)
+                    .filter(|name| !predefined.contains(name))
+                    .into_iter()
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if more.is_empty() || predefined.len() > 256 {
+            return result;
+        }
+        predefined.extend(more);
+        predefined.sort();
+        predefined.dedup();
+    }
+}
+
+/// The value a "reads `x`, which only some branches ... define" or a "returns
+/// `x` without defining every declared element" refusal names (the latter: an
+/// output a loop defines once it has converged, `u` of Brent's solver).
+fn branch_partial_read(detail: &str) -> Option<VarName> {
+    if let Some((_, rest)) = detail.split_once("` reads `") {
+        let (name, rest) = rest.split_once('`')?;
+        return rest.starts_with(", which only some branches").then(|| VarName::new(name));
+    }
+    let (_, rest) = detail.split_once("` returns `")?;
+    let (name, rest) = rest.split_once('`')?;
+    rest.starts_with(" without defining").then(|| VarName::new(name))
+}
+
+/// The seed of `name`: its own, or its field's in the seed of the record it
+/// was split from (`bpro__cv` of `bpro`).
+fn predefined_seed(
+    name: &VarName,
+    definitions: &FunctionDefinitions,
+    context: FunctionValidationContext<'_>,
+    span: Span,
+) -> Option<FunctionValueSeed> {
+    definitions.whole_loop_seed(name, context, span).ok().or_else(|| {
+        let (parent, field) = name.as_str().rsplit_once("__")?;
+        match definitions
+            .whole_loop_seed(&VarName::new(parent), context, span)
+            .ok()?
+        {
+            FunctionValueSeed::Record {
+                dimensions, fields, ..
+            } if dimensions.is_empty() => fields
+                .into_iter()
+                .find(|(candidate, _)| candidate.as_str() == field)
+                .map(|(_, seed)| seed),
+            _ => None,
+        }
+    })
+}
+
+fn validate_statement_function_with(
+    function: &rumoca_core::Function,
+    context: FunctionValidationContext<'_>,
+    predefined: &[VarName],
 ) -> Result<FunctionPlan, ToDaeError> {
     let normalized = normalize_function_source(function, &function.body, context, true)?;
     let roles = roles_with_guards(context.roles, &normalized.guards);
@@ -166,6 +244,15 @@ fn validate_statement_function(
         &mut definitions,
     )?;
     entry_seeds.extend(definitions.entry_value_seeds(normalized_context)?);
+    for name in predefined {
+        if definitions.is_defined(name) || entry_seeds.iter().any(|(seeded, _)| seeded == name) {
+            continue;
+        }
+        if let Some(seed) = predefined_seed(name, &definitions, normalized_context, function.span) {
+            definitions.define_whole(name);
+            entry_seeds.push((name.clone(), seed));
+        }
+    }
     let (statements, definedness) = validate_top_level_statements(
         function,
         &normalized.statements,
@@ -173,6 +260,20 @@ fn validate_statement_function(
         &mut definitions,
     )?;
     require_total_outputs(function, &definitions)?;
+    // A value read where only some paths assigned it is checked at run time
+    // (MLS §12.4.4); it starts from its zero seed instead, after the analysis,
+    // which keeps its plan (IF97 `boilingcurve_p`: `bpro.cv`).
+    let mut partial = definedness.asserted_reads.values().flatten().collect::<Vec<_>>();
+    partial.sort();
+    partial.dedup();
+    for name in partial {
+        if entry_seeds.iter().any(|(seeded, _)| seeded == name) {
+            continue;
+        }
+        if let Some(seed) = predefined_seed(name, &definitions, normalized_context, function.span) {
+            entry_seeds.push((name.clone(), seed));
+        }
+    }
     Ok(FunctionPlan::Statements {
         statements,
         generated_booleans: normalized

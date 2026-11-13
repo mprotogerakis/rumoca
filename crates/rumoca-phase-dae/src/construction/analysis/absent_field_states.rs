@@ -52,9 +52,19 @@ pub(in crate::construction) struct AbsentFieldStates {
     forwarded: std::collections::HashSet<(VarName, Vec<String>)>,
 }
 
+/// nomosim: MSL compatibility. A function value only some paths assign starts
+/// from its zero seed (`function_bodies::validate_statement_function`), so no
+/// result field is absent where it is read and none is carried across a call.
+/// A carried state is what Solve does not lower yet (#686 step 1b): with it,
+/// IF97 water (`boilingcurve_p`) builds its DAE and is refused at lowering.
+const ZERO_SEEDS_UNASSIGNED_VALUES: bool = true;
+
 impl AbsentFieldStates {
     pub(in crate::construction) fn analyze(flat: &flat::Model) -> Self {
         let mut states = Self::default();
+        if ZERO_SEEDS_UNASSIGNED_VALUES {
+            return states;
+        }
         for (name, function) in &flat.functions {
             if function.is_constructor || function.external.is_some() {
                 continue;
