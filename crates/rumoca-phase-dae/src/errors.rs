@@ -186,6 +186,94 @@ pub enum ToDaeError {
         #[label("invalid DAE operation")]
         span: Span,
     },
+
+    /// A construction check that the earlier phases are meant to make
+    /// impossible (see `invariant_kind`), so a failure is a defect in rumoca,
+    /// or, for a shape or type check, possibly an ill-formed expression those
+    /// phases let through. Named by the model part construction was building.
+    #[error("{}", invariant_message(.source, .building))]
+    #[diagnostic(
+        code(rumoca::todae::ED020),
+        help("the checked DAE constructor rejected this operation at its semantic owner")
+    )]
+    ConstructionInvariant {
+        source: dae::DaeConstructionError,
+        #[label("invalid DAE operation")]
+        span: Span,
+        /// The flat variable, equation, or function specialization construction
+        /// was building, named, with its source span; `None` when unknown.
+        building: Option<Box<(String, Span)>>,
+    },
+}
+
+/// Who is at fault when a construction check fails: `Some(true)` for checks of the
+/// constructor's own bookkeeping (identities, scopes, certificates, owners),
+/// which fail only when rumoca is wrong; `Some(false)` for shape and type
+/// checks, which also reject ill-formed source expressions; `None` for checks
+/// that refuse the model itself or a feature rumoca does not support.
+fn invariant_kind(source: &dae::DaeConstructionError) -> Option<bool> {
+    use dae::DaeConstructionError as E;
+    match source {
+        E::InvalidArity { .. }
+        | E::UnknownId { .. }
+        | E::CapacityExceeded { .. }
+        | E::InvalidBinderScope { .. }
+        | E::InvalidFunctionScope { .. }
+        | E::InvalidModelActivationScope { .. }
+        | E::MissingFunctionCallCertificate { .. }
+        | E::MissingHistoryOperatorCertificate { .. }
+        | E::InvalidCallProjectionOwner { .. }
+        | E::DuplicateRuntimeQuotientOwner { .. }
+        | E::InvalidQuotientReplayStage { .. }
+        | E::UnconsumedQuotientReplay { .. }
+        | E::InvalidVariableRole { .. }
+        | E::InvalidDiscreteTopologyPlan { .. }
+        | E::InvalidDiscreteElementSelection { .. }
+        | E::InvalidDiscreteTargetOrder { .. }
+        | E::InvalidEffectiveTypeId { .. }
+        | E::ConflictingEffectiveType { .. }
+        | E::MissingProvenance { .. }
+        | E::UnknownSource { .. }
+        | E::InvalidSourceRange { .. }
+        | E::DuplicateTopology { .. }
+        | E::MissingPredefinedString { .. }
+        | E::ConflictingPredefinedString { .. }
+        | E::InvalidRecursiveFunctionGroup { .. }
+        | E::InvalidFunctionDependency { .. }
+        | E::MissingClockDomainOwner { .. } => Some(true),
+        E::ShapeMismatch { .. }
+        | E::TypeMismatch { .. }
+        | E::ExpectedScalar { .. }
+        | E::ExpectedNumeric { .. }
+        | E::ExpectedPrimitiveRelation { .. }
+        | E::InvalidSubscript { .. } => Some(false),
+        _ => None,
+    }
+}
+
+fn invariant_message(
+    source: &dae::DaeConstructionError,
+    building: &Option<Box<(String, Span)>>,
+) -> String {
+    let internal = invariant_kind(source) == Some(true);
+    let mut message = format!(
+        "{}canonical DAE construction rejected an invalid operation: {source}",
+        if internal {
+            "internal compiler error: "
+        } else {
+            ""
+        }
+    );
+    if let Some(owner) = building {
+        message.push_str(&format!(" while building {}", owner.0));
+    }
+    message.push_str(if internal {
+        "; this is a defect in rumoca, not in your model"
+    } else {
+        "; if the marked expression is valid Modelica, this is an internal compiler error \
+         (a defect in rumoca, not in your model)"
+    });
+    message
 }
 
 impl ToDaeError {
@@ -206,6 +294,21 @@ impl ToDaeError {
     pub fn with_balance_leftover(mut self, named: BalanceLeftover) -> Self {
         if let Self::Unbalanced { leftover, .. } = &mut self {
             **leftover = named;
+        }
+        self
+    }
+
+    /// Name the model part DAE construction was building when it failed.
+    #[must_use]
+    pub fn while_building(mut self, owner: Option<(String, Span)>) -> Self {
+        match &mut self {
+            Self::ConstructionInvariant { building, .. } => *building = owner.map(Box::new),
+            Self::Internal { detail } => {
+                if let Some((owner, _)) = owner {
+                    detail.push_str(&format!(" while building {owner}"));
+                }
+            }
+            _ => {}
         }
         self
     }
@@ -330,7 +433,8 @@ impl ToDaeError {
             | Self::UninitializedFunctionValue { span, .. }
             | Self::ContinuousDiscreteDefinition { span, .. }
             | Self::DiscreteRealWithoutWhen { span, .. }
-            | Self::Construction { span, .. } => std::slice::from_ref(span),
+            | Self::Construction { span, .. }
+            | Self::ConstructionInvariant { span, .. } => std::slice::from_ref(span),
             Self::Unbalanced { .. }
             | Self::Internal { .. }
             | Self::MissingProvenance { .. }
@@ -370,6 +474,13 @@ impl From<dae::DaeConstructionError> for ToDaeError {
             );
         }
         match source.source_span() {
+            Some(span) if !span.is_dummy() && invariant_kind(&source).is_some() => {
+                Self::ConstructionInvariant {
+                    source,
+                    span,
+                    building: None,
+                }
+            }
             Some(span) if !span.is_dummy() => Self::Construction { source, span },
             _ => Self::internal(source.to_string()),
         }
@@ -379,19 +490,86 @@ impl From<dae::DaeConstructionError> for ToDaeError {
 impl PhaseError for ToDaeError {
     fn to_diagnostic(&self) -> CommonDiagnostic {
         let mut diagnostic = miette_phase_error_to_diagnostic(self, self.diagnostic_source_spans());
-        if let Self::Unbalanced { leftover, .. } = self {
-            diagnostic.labels.extend(
-                leftover
-                    .listed
-                    .iter()
-                    .filter(|(_, span)| !span.is_dummy())
-                    .map(|(text, span)| Label {
-                        span: *span,
-                        message: Some(text.clone()),
-                        primary: false,
-                    }),
-            );
-        }
+        let secondary = match self {
+            Self::Unbalanced { leftover, .. } => leftover.listed.clone(),
+            Self::ConstructionInvariant {
+                building: Some(owner),
+                span,
+                ..
+            } if owner.1 != *span => vec![(format!("while building {}", owner.0), owner.1)],
+            _ => Vec::new(),
+        };
+        diagnostic.labels.extend(
+            secondary
+                .into_iter()
+                .filter(|(_, span)| !span.is_dummy())
+                .map(|(text, span)| Label {
+                    span,
+                    message: Some(text),
+                    primary: false,
+                }),
+        );
         diagnostic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rumoca_core::SourceMap;
+
+    use super::*;
+
+    #[test]
+    fn an_invariant_failure_is_a_rumoca_defect_named_by_its_model_part() {
+        let mut sources = SourceMap::new();
+        let source = sources.add("Plant.mo", "model Plant Real cooling = f(1); end Plant;");
+        let operation = Span::from_offsets(source, 27, 31);
+        let declaration = Span::from_offsets(source, 12, 31);
+        let error = ToDaeError::from(dae::DaeConstructionError::InvalidArity {
+            expected: 2,
+            found: 1,
+            span: operation,
+        })
+        .while_building(Some((
+            "the declaration of `col.cooling`".to_string(),
+            declaration,
+        )));
+        assert_eq!(
+            error.to_string(),
+            "internal compiler error: canonical DAE construction rejected an invalid operation: \
+             invalid expression arity: expected 2, found 1 while building the declaration of \
+             `col.cooling`; this is a defect in rumoca, not in your model"
+        );
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(diagnostic.code.as_deref(), Some("ED020"));
+        let labels = diagnostic
+            .labels
+            .iter()
+            .map(|label| (label.span, label.message.as_deref(), label.primary))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                (operation, Some("invalid DAE operation"), true),
+                (
+                    declaration,
+                    Some("while building the declaration of `col.cooling`"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_the_model_itself_claims_no_defect() {
+        let mut sources = SourceMap::new();
+        let source = sources.add("Steps.mo", "model Steps Real x[0] = 1:0:3; end Steps;");
+        let error = ToDaeError::from(dae::DaeConstructionError::ZeroRangeStep {
+            span: Span::from_offsets(source, 24, 29),
+        });
+        assert_eq!(
+            error.to_string(),
+            "canonical DAE construction rejected an invalid operation: range step cannot be zero"
+        );
     }
 }
