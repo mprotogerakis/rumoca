@@ -52,6 +52,9 @@ pub struct EvalContext {
 
     /// Lexical instance scope used for modification-binding lookup.
     lookup_scope: Option<ComponentPath>,
+
+    /// Every name is relative to `lookup_scope`, composite ones included.
+    relative_names: bool,
 }
 
 impl Default for EvalContext {
@@ -76,6 +79,7 @@ impl EvalContext {
             values_by_instance: IndexMap::with_capacity_and_hasher(parameters, FxBuildHasher),
             deferred_parameters: IndexMap::with_capacity_and_hasher(0, FxBuildHasher),
             lookup_scope: None,
+            relative_names: false,
         }
     }
 
@@ -162,6 +166,13 @@ impl EvalContext {
         self.lookup_scope = scope;
     }
 
+    /// Read every name as written in `lookup_scope`'s class, such as a
+    /// declared dimension: `Medium.nX` then names that scope's `Medium`
+    /// before any other (MLS §5.3).
+    pub fn set_relative_names(&mut self, relative_names: bool) {
+        self.relative_names = relative_names;
+    }
+
     /// Look up a variable/parameter by name.
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.lookup_value(&self.parameters, name)
@@ -184,7 +195,7 @@ impl EvalContext {
     /// Apply the shared scope order to an inventory without copying its entries.
     pub(crate) fn lookup<T>(&self, name: &str, get: impl Fn(&str) -> Option<T>) -> Option<T> {
         let name_path = ComponentPath::from_flat_path(name);
-        if name_path.len() == 1
+        if (name_path.len() == 1 || self.relative_names)
             && let Some(scope) = self.lookup_scope.as_ref()
             && let Some(value) = lookup_scoped_with(&get, name, &scope.to_flat_string())
         {
