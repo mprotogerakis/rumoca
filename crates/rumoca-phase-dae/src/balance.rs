@@ -79,3 +79,33 @@ impl std::fmt::Display for BalanceBreakdown {
         )
     }
 }
+
+/// What a maximum matching of an unbalanced model leaves over: the unknowns
+/// without an equation, or the equations without an unknown, each named in
+/// model terms (instance path, source text, origin) with its source span.
+#[derive(Debug, Clone, Default)]
+pub struct BalanceLeftover {
+    /// Which side is left over, as the message reads it.
+    pub heading: &'static str,
+    /// The first leftover owners, named, with their source spans.
+    pub listed: Vec<(String, rumoca_core::Span)>,
+    /// How many more owners are left over than `listed` names.
+    pub more: usize,
+}
+
+impl std::fmt::Display for BalanceLeftover {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.listed.is_empty() {
+            return Ok(());
+        }
+        write!(formatter, "; {}: ", self.heading)?;
+        for (index, (text, _)) in self.listed.iter().enumerate() {
+            let separator = if index == 0 { "" } else { "; " };
+            write!(formatter, "{separator}{text}")?;
+        }
+        if self.more > 0 {
+            write!(formatter, "; and {} more", self.more)?;
+        }
+        Ok(())
+    }
+}

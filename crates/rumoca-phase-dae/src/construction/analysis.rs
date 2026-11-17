@@ -186,6 +186,7 @@ pub(super) use record_equations::{
 };
 use record_equations::{analyze_record_equations, record_result_fields};
 use sample_aliases::analyze_sample_aliases;
+pub(super) use source_balance::balance_leftover;
 use source_balance::{SourceBalanceInput, source_balance};
 use structural_selections::{has_decidable_conditionals, select_structural_branches};
 use structured_families::{
