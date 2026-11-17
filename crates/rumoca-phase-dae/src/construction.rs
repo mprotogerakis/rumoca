@@ -2,6 +2,7 @@ mod affine_slices;
 mod algorithm;
 mod algorithm_lowering;
 mod analysis;
+mod building;
 pub use analysis::StructuralSelection;
 mod clock_operator_hosts;
 mod clocks;
@@ -79,6 +80,7 @@ use analysis::{
     specialized_comprehension_plan, structured_assignment_names,
     when_conditional_selects_clock_structure, when_function_call_key,
 };
+use building::{Building, building};
 use clock_operator_hosts::clock_operator_hosts;
 use clocks::{LoweredClocks, lower_clocked_value_owners, lower_clocks};
 use conditions::{
@@ -272,15 +274,23 @@ pub(crate) fn construct_with_evidence(
     let flat = prepared.as_ref();
     let analysis = analyze(flat)?.with_semi_linear_rules(flat);
     if !flat.is_partial && !analysis.balance.is_balanced() {
-        return Err(ToDaeError::unbalanced_from_detail(analysis.balance));
+        // The leftover replays the balance count that just succeeded; should it
+        // fail anyway, ED001 still stands, with its counts only.
+        let leftover = analysis::balance_leftover(flat, &analysis, &source_map).unwrap_or_default();
+        return Err(
+            ToDaeError::unbalanced_from_detail(analysis.balance).with_balance_leftover(leftover)
+        );
     }
     let variable_plan = plan_variable_construction(flat, &analysis)?;
     let external_tables = native_tables::build_external_tables(flat, &analysis.constants)?;
 
+    building(None);
     let dae = dae::Dae::construct(source_map, |construction| {
         build_checked(flat, &analysis, &variable_plan, construction)
     })
-    .map_err(ToDaeError::from)?;
+    .map_err(|error| {
+        ToDaeError::from(error).while_building(building::failed_owner(flat, &analysis))
+    })?;
     Ok(crate::DaeConstructionResult {
         dae: dae.with_external_tables(external_tables),
         balance_detail: analysis.balance,
@@ -636,7 +646,7 @@ fn lower_bindings<'dae>(
         coordinate_owners,
         clocks,
     } = request;
-    for (name, variable) in &flat.variables {
+    for (index, (name, variable)) in flat.variables.iter().enumerate() {
         let Some(binding) = &variable.binding else {
             continue;
         };
@@ -647,6 +657,7 @@ fn lower_bindings<'dae>(
         if matches!(coordinate, Coordinate::Parameter(_) | Coordinate::Input(_)) {
             continue;
         }
+        building(Some(Building::Binding(index)));
         let Some(binding_span) = binding.span() else {
             return Err(dae::DaeConstructionError::MissingProvenance {
                 origin: dae::DaeProvenanceOrigin::Source,
@@ -686,6 +697,7 @@ fn lower_bindings<'dae>(
             }
         }
     }
+    building(None);
     Ok(())
 }
 
@@ -905,6 +917,10 @@ fn lower_structured_equations<'dae>(
         {
             continue;
         }
+        building(Some(Building::Equation {
+            initial: rows.initialization,
+            row: family.first_equation_index,
+        }));
         let owner = equation_owner_provenance(&family.origin, family.span)?;
         let generated_root = equation_generation(&family.origin);
         let domain =
@@ -990,6 +1006,7 @@ fn lower_structured_equations<'dae>(
             bodies,
         )?;
     }
+    building(None);
     Ok(())
 }
 
@@ -1371,6 +1388,10 @@ fn lower_equations<'dae>(
         if input.excluded.contains(&index) {
             continue;
         }
+        building(Some(Building::Equation {
+            initial: input.initialization,
+            row: index,
+        }));
         let owner = equation_owner_provenance(&equation.origin, equation.span)?;
         let occurrence = input.component_occurrence(equation)?;
         let generation = equation_generation(&equation.origin);
@@ -1426,6 +1447,7 @@ fn lower_equations<'dae>(
             },
         )?;
     }
+    building(None);
     Ok(())
 }
 

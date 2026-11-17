@@ -16,6 +16,7 @@ mod file_summary_tests;
 mod flat_model_query_tests;
 mod instantiation_query_tests;
 mod model_closure_tests;
+mod model_terms_diagnostics_tests;
 mod operator_record_closure_tests;
 mod overconstrained_closure_tests;
 mod package_def_map_tests;
