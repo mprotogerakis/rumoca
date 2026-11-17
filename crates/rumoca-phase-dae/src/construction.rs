@@ -274,7 +274,12 @@ pub(crate) fn construct_with_evidence(
     let flat = prepared.as_ref();
     let analysis = analysis.with_semi_linear_rules(flat);
     if !flat.is_partial && !analysis.balance.is_balanced() {
-        return Err(ToDaeError::unbalanced_from_detail(analysis.balance));
+        // The leftover replays the balance count that just succeeded; should it
+        // fail anyway, ED001 still stands, with its counts only.
+        let leftover = analysis::balance_leftover(flat, &analysis, &source_map).unwrap_or_default();
+        return Err(
+            ToDaeError::unbalanced_from_detail(analysis.balance).with_balance_leftover(leftover)
+        );
     }
     let variable_plan = plan_variable_construction(flat, &analysis)?;
     let external_tables = native_tables::build_external_tables(flat, &analysis.constants)?;

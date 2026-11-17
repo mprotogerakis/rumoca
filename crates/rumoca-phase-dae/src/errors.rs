@@ -2,19 +2,20 @@
 
 use miette::Diagnostic;
 use rumoca_core::{
-    BoxedResult, Diagnostic as CommonDiagnostic, PhaseError, Span, miette_phase_error_to_diagnostic,
+    BoxedResult, Diagnostic as CommonDiagnostic, Label, PhaseError, Span,
+    miette_phase_error_to_diagnostic,
 };
 use rumoca_ir_dae as dae;
 use thiserror::Error;
 
-use crate::balance::{BalanceBreakdown, BalanceDetail};
+use crate::balance::{BalanceBreakdown, BalanceDetail, BalanceLeftover};
 
 pub type ToDaeResult<T> = BoxedResult<T, ToDaeError>;
 
 #[derive(Debug, Clone, Error, Diagnostic)]
 pub enum ToDaeError {
     #[error(
-        "unbalanced model: {equations} equations, {unknowns} unknowns (balance = {balance}); {detail}"
+        "unbalanced model: {equations} equations, {unknowns} unknowns (balance = {balance}); {detail}{leftover}"
     )]
     #[diagnostic(
         code(rumoca::todae::ED001),
@@ -25,6 +26,8 @@ pub enum ToDaeError {
         unknowns: usize,
         balance: i64,
         detail: BalanceBreakdown,
+        /// What a maximum matching leaves over, named; empty when not computed.
+        leftover: Box<BalanceLeftover>,
     },
 
     #[error("internal ToDAE error: {detail}")]
@@ -194,7 +197,17 @@ impl ToDaeError {
             unknowns,
             balance,
             detail: detail.into(),
+            leftover: Box::default(),
         }
+    }
+
+    /// Name what the model's maximum matching leaves over (ED001).
+    #[must_use]
+    pub fn with_balance_leftover(mut self, named: BalanceLeftover) -> Self {
+        if let Self::Unbalanced { leftover, .. } = &mut self {
+            **leftover = named;
+        }
+        self
     }
 
     pub fn balance_detail(&self) -> Option<&BalanceDetail> {
@@ -365,6 +378,20 @@ impl From<dae::DaeConstructionError> for ToDaeError {
 
 impl PhaseError for ToDaeError {
     fn to_diagnostic(&self) -> CommonDiagnostic {
-        miette_phase_error_to_diagnostic(self, self.diagnostic_source_spans())
+        let mut diagnostic = miette_phase_error_to_diagnostic(self, self.diagnostic_source_spans());
+        if let Self::Unbalanced { leftover, .. } = self {
+            diagnostic.labels.extend(
+                leftover
+                    .listed
+                    .iter()
+                    .filter(|(_, span)| !span.is_dummy())
+                    .map(|(text, span)| Label {
+                        span: *span,
+                        message: Some(text.clone()),
+                        primary: false,
+                    }),
+            );
+        }
+        diagnostic
     }
 }
