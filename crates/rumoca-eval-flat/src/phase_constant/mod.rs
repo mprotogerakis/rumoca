@@ -540,7 +540,11 @@ fn infer_builtin_call_dimensions_with_context(
             if args.len() < 2 {
                 return None;
             }
-            eval_dimension_args_with_context(&args[1..], ctx)
+            // MLS §10.3.3: the filled value's own axes follow the new ones; a
+            // value of unproven shape is taken as the scalar it usually is.
+            let mut dims = eval_dimension_args_with_context(&args[1..], ctx)?;
+            dims.extend(infer_dimensions_scoped(&args[0], ctx).unwrap_or_default());
+            Some(dims)
         }
         rumoca_core::BuiltinFunction::Linspace => {
             if args.len() != 3 {
