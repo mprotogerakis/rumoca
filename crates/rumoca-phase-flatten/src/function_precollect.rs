@@ -80,11 +80,19 @@ pub(crate) fn pre_collect_functions(
 
     let mut pending = function_names.into_entries();
     let mut visited = functions::FunctionRequests::default();
+    let mut misexposed = rustc_hash::FxHashSet::default();
     while let Some(func_request) = pending.pop() {
         if !visited.insert_if_new(func_request.clone()) {
             continue;
         }
-        let Some(func) = add_function_to_context(&func_request, ctx, overlay, tree, class_index)?
+        let Some(func) = add_function_to_context(
+            &func_request,
+            ctx,
+            overlay,
+            tree,
+            class_index,
+            &mut misexposed,
+        )?
         else {
             continue;
         };
@@ -104,6 +112,7 @@ fn add_function_to_context(
     overlay: &ast::InstanceOverlay,
     tree: &ast::ClassTree,
     class_index: &ast::ClassDefIndex<'_>,
+    misexposed: &mut rustc_hash::FxHashSet<String>,
 ) -> Result<Option<rumoca_core::Function>, FlattenError> {
     let Some((resolved_name, func)) = functions::lookup_function_request(
         tree,
@@ -125,17 +134,58 @@ fn add_function_to_context(
     if !ctx.functions.contains_key(&resolved_name) {
         ctx.functions.insert(resolved_name.clone(), func.clone());
     }
+    // MLS §5.3: classes with their own `Medium` all spell `Medium.density`,
+    // and that one spelling keys one exposure. An exposure minted through an
+    // owner that misses its callee yields to the first request whose owner
+    // contains it, whichever of the two is met first.
+    let misses = owner_misses_callee(request, &func, tree, class_index);
     if ctx
         .functions
         .get(&request.name)
         .is_none_or(|existing| existing.name.as_str() != request.name)
+        || (!misses && misexposed.remove(&request.name))
     {
         insert_requested_exposure(&mut ctx.functions, &request.name, &func, tree, class_index)?;
+        if misses {
+            misexposed.insert(request.name.clone());
+        }
     }
     add_function_short_name(&request.name, &func, ctx);
     add_function_short_name(&resolved_name, &func, ctx);
     add_function_short_name(&qualified_name, &func, ctx);
     Ok(Some(func))
+}
+
+/// Resolve looks `Medium.density` up in the package an `extends` modifier
+/// redeclares `Medium` to, yet the `Medium` segment keeps the base class's
+/// declaration (`PartialTwoPort.Medium`, a `PartialMedium`). That owner does
+/// not contain the callee, and the callee's record types resolved through it
+/// are the partial, empty ones.
+fn owner_misses_callee(
+    request: &functions::FunctionRequest,
+    func: &rumoca_core::Function,
+    tree: &ast::ClassTree,
+    class_index: &ast::ClassDefIndex<'_>,
+) -> bool {
+    let (Some(owner), Some(callee)) = (request.exposure_owner(), func.def_id) else {
+        return false;
+    };
+    let (Some(_), Some(owner_name), Some(callee_package)) = (
+        class_index.get(owner),
+        class_index.qualified_name(owner),
+        class_index.parent_def_id(callee),
+    ) else {
+        return false;
+    };
+    let mut chain = Vec::new();
+    crate::pipeline::collect_package_chain(
+        tree,
+        class_index,
+        owner_name,
+        &mut chain,
+        &mut rustc_hash::FxHashSet::default(),
+    );
+    !chain.contains(&callee_package)
 }
 
 fn insert_requested_exposure(

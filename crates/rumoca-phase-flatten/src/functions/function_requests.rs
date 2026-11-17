@@ -63,6 +63,14 @@ impl FunctionRequest {
         }
     }
 
+    /// The segment a qualified reference reaches its callee through: `Medium`
+    /// in `Medium.density`, `world` in `world.F`.
+    pub(crate) fn exposure_owner(&self) -> Option<rumoca_core::DefId> {
+        let reference = self.component_ref.as_ref()?;
+        let owner = reference.component_scope().prefix_parts().last()?;
+        Some(owner.def_id)
+    }
+
     pub(super) fn from_name(name: String) -> Self {
         Self {
             name,
@@ -189,6 +197,13 @@ pub(super) fn same_function_request(left: &FunctionRequest, right: &FunctionRequ
         && left_ref == right_ref
     {
         return true;
+    }
+    // One declaration exposed through two owners is two functions: the body
+    // resolves the owner's members (`Medium.ThermodynamicState`), MLS §7.3.
+    if let (Some(left_owner), Some(right_owner)) = (left.exposure_owner(), right.exposure_owner())
+        && left_owner != right_owner
+    {
+        return false;
     }
     match (left.target_def_id, right.target_def_id) {
         (Some(left_id), Some(right_id)) => left_id == right_id && left.name == right.name,
