@@ -23,6 +23,7 @@ pub(super) fn insert_variable_identities<'flat, 'dae>(
         let Some(role) = analysis.roles[name].runtime() else {
             continue;
         };
+        building(Some(Building::Variable(source_ordinal)));
         let provenance = dae::DaeProvenance::source(variable.source_span)?;
         let value_type = value_types[name];
         let scalar_type = effective_variable_scalar_type(flat, variable)
@@ -64,6 +65,7 @@ pub(super) fn insert_variable_identities<'flat, 'dae>(
             definition,
         });
     }
+    building(None);
     Ok(VariableIdentityPass {
         coordinates,
         reserved,
@@ -136,9 +138,11 @@ pub(super) fn define_reserved_variables<'dae>(
             let Some(reserved) = reserved[source_ordinal].take() else {
                 continue;
             };
+            building(Some(Building::Variable(source_ordinal)));
             define_reserved_variable(construction, context, reserved)?;
         }
     }
+    building(None);
     debug_assert!(reserved.iter().all(Option::is_none));
     Ok(())
 }
