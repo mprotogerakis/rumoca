@@ -267,12 +267,23 @@ pub(super) fn exact_override_package_for_source_package<'a>(
     // (`package Medium = ConstantPropertyLiquidWater`) denotes the class it
     // names, so selections that reach one package through its aliases are one.
     let mut seen = FxHashSet::default();
-    candidates.retain(|package| {
-        seen.insert(
-            resolve_package_alias_chain(ctx.tree, ctx.class_index, package.def_id)
-                .map_or(package.def_id, |selected| selected.def_id),
-        )
-    });
+    let selected = |def_id| {
+        resolve_package_alias_chain(ctx.tree, ctx.class_index, def_id)
+            .map_or(def_id, |selected| selected.def_id)
+    };
+    candidates.retain(|package| seen.insert(selected(package.def_id)));
+    // MLS §7.3: a call spelled through one of the selected packages
+    // (`NomoChem.Media.LiquidMixture.f`, as a selection respells it) stays
+    // with it, even when another alias in scope selects a different package.
+    if let Some(prefix) = reference
+        .component_ref()
+        .and_then(|component_ref| component_ref.component_scope().prefix_parts().last())
+        && let Some(package) = candidates
+            .iter()
+            .find(|package| selected(package.def_id) == selected(prefix.def_id))
+    {
+        return Ok(Some(*package));
+    }
     if !has_active
         && let Some(lexical_package) = ctx.lexical_package_def_id
         && candidates
