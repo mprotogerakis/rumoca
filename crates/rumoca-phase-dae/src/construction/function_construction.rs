@@ -93,6 +93,7 @@ pub(super) fn construct_functions<'dae>(
 ) -> Result<HashMap<FunctionSpecializationKey, dae::FunctionId<'dae>>, dae::DaeConstructionError> {
     let mut ids = HashMap::with_capacity(shapes.certificates().len());
     for component in shapes.construction_components() {
+        building(Some(Building::Function(component.members[0])));
         if component.recursive {
             construct_recursive_component(
                 construction,
@@ -120,6 +121,7 @@ pub(super) fn construct_functions<'dae>(
             ids.insert(shapes.certificates()[specialization].key.clone(), function);
         }
     }
+    building(None);
     construct_derivatives(construction, shapes, &ids)?;
     Ok(ids)
 }
@@ -222,6 +224,7 @@ fn construct_recursive_component<'dae>(
             );
         }
         for (&specialization, reservation) in specializations.iter().zip(reservations) {
+            building(Some(Building::Function(specialization)));
             define_function(
                 construction,
                 coordinates,
