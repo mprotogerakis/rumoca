@@ -1128,6 +1128,7 @@ pub(crate) fn finalize_flat_model(
     resolve_nested_constructor_field_access_bindings(flat);
     crate::postprocess::freeze_current_discrete_selections(flat);
     crate::postprocess::fold_invariant_bindings(flat, &ctx.resource_roots);
+    crate::postprocess::spell_array_valued_fills(flat, ctx);
     functions::prune_unreachable_functions(flat);
     functions::validate_flat_function_bindings(flat)?;
     ctx.refresh_enum_parameter_lookup(flat);
