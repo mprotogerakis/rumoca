@@ -6,6 +6,7 @@
 //! owns and then substitute the known constants, walking each place the model
 //! stores an expression exactly once.
 
+mod array_fill;
 mod constant_expansion;
 mod constant_lookup;
 mod constant_substituter;
@@ -27,6 +28,8 @@ mod when_discrete_reads;
 use super::*;
 
 pub(crate) use when_discrete_reads::freeze_current_discrete_selections;
+
+pub(crate) use array_fill::spell_array_valued_fills;
 
 pub(crate) use constant_lookup::constant_expr_preserves_array_shape;
 pub(crate) use constant_substituter::substitute_known_constants_expr;
