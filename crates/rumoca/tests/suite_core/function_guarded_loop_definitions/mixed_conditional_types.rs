@@ -35,7 +35,10 @@ fn refuse_integer(selector: &str) {
     assert_eq!(failure.error_code.as_deref(), Some("ED020"));
     assert_eq!(
         failure.error,
-        "canonical DAE construction rejected an invalid operation: expression shape mismatch"
+        "canonical DAE construction rejected an invalid operation: expression shape mismatch \
+         while building function `MixedConditional` specialized for (scalar); if the marked \
+         expression is valid Modelica, this is an internal compiler error (a defect in rumoca, \
+         not in your model)"
     );
     let label = failure
         .primary_label
