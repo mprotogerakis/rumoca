@@ -1,7 +1,8 @@
 //! MLS §5.3, §7.3: `Medium.X_default` read in `col.cooling` is the constant of
 //! the package `cooling` selects (`Water`, one substance). Its binding names
 //! `reference_X`, which resolves in that package, not in `col`, whose own
-//! `Medium` (`Mix`, three substances) modifies `reference_X`.
+//! `Medium` (`Mix`, three substances) modifies `reference_X`. With `Column`
+//! itself the model, its `Medium.nX` does not size `cooling.X_start` either.
 
 use rumoca_core::Expression;
 use rumoca_ir_ast as ast;
@@ -45,9 +46,9 @@ package Q
 end Q;
 "#;
 
-#[test]
-fn package_constant_binding_resolves_in_the_exposing_package() {
-    let model = "Q.Plant";
+/// Flatten `model`, check the cooling volume's composition is water's (one
+/// element by dimension and by binding), and lower it to DAE.
+fn assert_cooling_volume_is_water(model: &str, cooling: &str) {
     let stored = rumoca_phase_parse::parse_to_ast(SOURCE, SOURCE_NAME).expect("fixture parses");
     let mut tree = ast::ClassTree::from_parsed(stored);
     tree.source_map.add(SOURCE_NAME, SOURCE);
@@ -59,14 +60,26 @@ fn package_constant_binding_resolves_in_the_exposing_package() {
         .expect("fixture typechecks");
     let flat = rumoca_phase_flatten::flatten_ref(&tree, &overlay, model).expect("fixture flattens");
 
-    let binding = flat.variables[&rumoca_core::VarName::new("col.cooling.X_start")]
+    let x_start = &flat.variables[&rumoca_core::VarName::new(format!("{cooling}.X_start"))];
+    assert_eq!(x_start.dims, [1], "{cooling}.X_start is sized by Mix");
+    let binding = x_start
         .binding
         .as_ref()
         .expect("X_start keeps its declaration binding");
     assert!(
         !matches!(binding, Expression::Array { elements, .. } if elements.len() == 3),
-        "col.cooling.X_start takes Mix's composition: {binding:?}"
+        "{cooling}.X_start takes Mix's composition: {binding:?}"
     );
     rumoca_phase_dae::to_dae(&flat, tree.source_map.clone())
         .expect("each volume's composition matches its medium");
+}
+
+#[test]
+fn package_constant_binding_resolves_in_the_exposing_package() {
+    assert_cooling_volume_is_water("Q.Plant", "col.cooling");
+}
+
+#[test]
+fn root_package_does_not_size_a_component_of_another_medium() {
+    assert_cooling_volume_is_water("Q.Column", "cooling");
 }
