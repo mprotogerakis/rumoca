@@ -4,7 +4,8 @@
 //! two exposures, and only `Machine.Medium` exposes `Gas.ThermodynamicState`.
 //! Either call may be met first, so both orders are checked. `Plant` holds two
 //! machines whose own `Medium` defaults to different packages: each call
-//! selects its own package's `density`.
+//! selects its own package's `density`. `Still` selects two packages in one
+//! column, and a call already spelled through one of them stays there.
 
 use rumoca_ir_ast as ast;
 
@@ -12,8 +13,15 @@ const SOURCE_NAME: &str = "relative-package-function-exposure.mo";
 const SOURCE: &str = r#"
 package P
   partial package PartialMedium
+    constant Real k = 1;
     replaceable record ThermodynamicState
     end ThermodynamicState;
+    function scale
+      input Real x;
+      output Real y;
+    algorithm
+      y := k*x;
+    end scale;
     replaceable partial function density
       input ThermodynamicState state;
       output Real d;
@@ -21,7 +29,7 @@ package P
   end PartialMedium;
 
   package Gas
-    extends PartialMedium;
+    extends PartialMedium(k = 2);
     redeclare record extends ThermodynamicState
       Real p;
       Real T;
@@ -33,7 +41,7 @@ package P
   end Gas;
 
   package Liquid
-    extends PartialMedium;
+    extends PartialMedium(k = 3);
     redeclare record extends ThermodynamicState
       Real p;
       Real T;
@@ -91,6 +99,22 @@ package P
     GasMachine gas;
     LiquidMachine liquid;
   end Plant;
+
+  model Vessel
+    replaceable package Medium = PartialMedium;
+    Real y = Medium.scale(1 + time);
+  end Vessel;
+
+  model Column
+    replaceable package Medium = Gas constrainedby PartialMedium;
+    replaceable package Medium_ST = Gas constrainedby PartialMedium;
+    Vessel vessel(redeclare package Medium = Medium);
+    Vessel steam(redeclare package Medium = Medium_ST);
+  end Column;
+
+  model Still
+    Column col(redeclare package Medium_ST = Liquid);
+  end Still;
 end P;
 "#;
 
@@ -153,5 +177,23 @@ fn each_owner_selects_its_own_package_function() {
             "{variable} calls {}, not {package_function}",
             name.as_str()
         );
+    }
+}
+
+#[test]
+fn call_spelled_through_a_selected_package_keeps_it() {
+    let (flat, _) = flatten("P.Still");
+    for (variable, package_function) in [
+        ("col.vessel.y", "P.Gas.scale"),
+        ("col.steam.y", "P.Liquid.scale"),
+    ] {
+        let binding = flat.variables[&rumoca_core::VarName::new(variable)]
+            .binding
+            .as_ref()
+            .expect("y keeps its declaration binding");
+        let rumoca_core::Expression::FunctionCall { name, .. } = binding else {
+            panic!("{variable} binds a call, found {binding:?}");
+        };
+        assert_eq!(name.as_str(), package_function, "{variable}");
     }
 }
