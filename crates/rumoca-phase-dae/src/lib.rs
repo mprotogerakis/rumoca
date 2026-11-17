@@ -13,7 +13,7 @@ use rumoca_core::SourceMap;
 use rumoca_ir_dae as dae;
 use rumoca_ir_flat as flat;
 
-pub use balance::{BalanceBreakdown, BalanceDetail};
+pub use balance::{BalanceBreakdown, BalanceDetail, BalanceLeftover};
 pub use errors::{ToDaeError, ToDaeResult};
 
 /// A completed canonical DAE and the source analysis that issued its evidence.
