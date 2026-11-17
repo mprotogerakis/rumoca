@@ -2,8 +2,18 @@
   "error": {
     "severity": "Error",
     "code": "ED001",
-    "message": "unbalanced model: 2 equations, 1 unknowns (balance = 1); unknowns[state=0 algebraic=0 output=1 discrete_real=0 discrete_value=0] equations[continuous=2 discrete_real=0 b1c_definition=0]",
-    "labels": [],
+    "message": "unbalanced model: 2 equations, 1 unknowns (balance = 1); unknowns[state=0 algebraic=0 output=1 discrete_real=0 discrete_value=0] equations[continuous=2 discrete_real=0 b1c_definition=0]; equations left over: `y=0` (top-level model equation)",
+    "labels": [
+      {
+        "span": {
+          "source": 1249943056337021614,
+          "start": 60,
+          "end": 63
+        },
+        "message": "`y=0` (top-level model equation)",
+        "primary": false
+      }
+    ],
     "notes": [
       "MLS §4.9 requires a balanced non-partial model; breakdown: unknowns[state=0 algebraic=0 output=1 discrete_real=0 discrete_value=0] equations[continuous=2 discrete_real=0 b1c_definition=0]"
     ]
