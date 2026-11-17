@@ -1,5 +1,6 @@
 //! ToDae diagnostics that say what is wrong in model terms: the instance paths
-//! an unbalanced model leaves over, with their source spans.
+//! an unbalanced model leaves over, and the model part a DAE construction
+//! check failed in, with their source spans.
 
 use super::*;
 
@@ -132,4 +133,67 @@ end Many;
     );
     assert!(error.ends_with("; and 2 more"), "{error}");
     assert_eq!(diagnostics[0].labels.len(), 8);
+}
+
+#[test]
+fn construction_shape_refusal_names_the_component_equation_it_arose_in() {
+    let source = "
+model Part
+  Real a[2, 2] = {{1, 0}, {0, 1}};
+  Real m[2, 2];
+equation
+  m = diagonal(a);
+end Part;
+model Plant
+  Part part;
+  Real x(start = 0, fixed = true);
+equation
+  der(x) = 1;
+end Plant;
+";
+    let (error, code, diagnostics) = todae_failure(source, "Plant");
+    assert_eq!(code.as_deref(), Some("ED020"));
+    assert_eq!(
+        error,
+        "canonical DAE construction rejected an invalid operation: expression shape mismatch \
+         while building equation from part; if the marked expression is valid Modelica, this \
+         is an internal compiler error (a defect in rumoca, not in your model)"
+    );
+    let labels = labelled(source, &diagnostics[0]);
+    assert_eq!(
+        labels[0],
+        ("diagonal(a)", "invalid DAE operation".to_string())
+    );
+    assert_eq!(
+        labels[1],
+        (
+            "m = diagonal(a)",
+            "while building equation from part".to_string()
+        )
+    );
+}
+
+#[test]
+fn construction_refusal_in_a_function_names_its_specialization() {
+    let source = "
+function MixedConditional
+  input Boolean flag;
+  output Integer y;
+algorithm
+  y := if flag then 1 else 2.0;
+end MixedConditional;
+model Mixed
+  input Boolean requested = true;
+  Integer y = MixedConditional(requested);
+end Mixed;
+";
+    let (error, code, _) = todae_failure(source, "Mixed");
+    assert_eq!(code.as_deref(), Some("ED020"));
+    assert_eq!(
+        error,
+        "canonical DAE construction rejected an invalid operation: expression shape mismatch \
+         while building function `MixedConditional` specialized for (scalar); if the marked \
+         expression is valid Modelica, this is an internal compiler error (a defect in rumoca, \
+         not in your model)"
+    );
 }

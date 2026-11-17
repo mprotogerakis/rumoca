@@ -886,12 +886,13 @@ fn repeated_branch_activation_rejects_a_conflicting_parent_without_mutation() {
     assert_eq!(phase_error.source_span(), Some(conflict_span));
     assert!(matches!(
         phase_error,
-        ToDaeError::Construction {
+        ToDaeError::ConstructionInvariant {
             source: dae::DaeConstructionError::InvalidDiscreteTopologyPlan {
                 target: 9,
                 span,
             },
             span: phase_span,
+            building: None,
         } if span == conflict_span && phase_span == conflict_span
     ));
 }
