@@ -1264,6 +1264,19 @@ impl SolveMeKernel {
         if !self.runtime.has_delay_channels() {
             return Ok(());
         }
+        // A step that ends on a scheduled time event commits the event's left
+        // limit. At the tick itself a time expression may already be on its
+        // post-event branch (`if time < 1 then 0 else 1`, MSL Step), which
+        // would record the jump as a ramp over the last step; the sources are
+        // read at the adjacent coordinate before it, as the event's pre values
+        // are. The right limit follows from the event iteration's commit.
+        let time_event_left = self
+            .pending_event_stop
+            .filter(|(event_time, _)| time_match_with_tol(*event_time, self.time))
+            .map(|_| timeline::event_left_limit_time(self.time));
+        let left_solver_y = time_event_left
+            .map(|left| self.solver_y_at_time(left))
+            .transpose()?;
         let settle = self.numerics_settle();
         let mut solver_y = self.solver_y_guess.borrow_mut();
         if solver_y.len() < self.states.len() {
@@ -1296,8 +1309,17 @@ impl SolveMeKernel {
             )?;
             self.cache_algebraic_coordinate(self.time, &self.states, &self.params, &solver_y);
         }
-        self.runtime
-            .commit_delay_history(self.time, &solver_y, &self.params)?;
+        match (time_event_left, &left_solver_y) {
+            (Some(left), Some(left_y)) => self.runtime.commit_delay_history_evaluated_at(
+                self.time,
+                left,
+                left_y,
+                &self.params,
+            )?,
+            _ => self
+                .runtime
+                .commit_delay_history(self.time, &solver_y, &self.params)?,
+        }
         Ok(())
     }
 

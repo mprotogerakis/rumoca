@@ -2,6 +2,7 @@
 //! the pinned Modelica Standard Library tree. See `suite_core/main.rs` for the
 //! grouping rules.
 
+mod fixed_delay_stepped;
 mod fourbar_connect_order;
 mod linearization_msl;
 mod move_supplied_derivative;

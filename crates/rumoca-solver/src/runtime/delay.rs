@@ -268,6 +268,7 @@ impl DelayRuntime {
         for channel in &mut state.channels {
             if let Some(last) = active_points(channel).last().copied()
                 && last.time < time
+                && !delay_time_matches(last.time, time)
             {
                 channel.points.push(DelayPoint {
                     time,
@@ -653,7 +654,7 @@ fn delayed_value(
     }
     let upper = points.partition_point(|point| point.time <= query_time);
     let lower = points[upper.saturating_sub(1)];
-    if discrete || upper < points.len() && points[upper].time == lower.time {
+    if discrete || upper < points.len() && delay_time_matches(points[upper].time, lower.time) {
         return lower.value;
     }
     let next = points.get(upper).copied().unwrap_or(DelayPoint {
@@ -679,7 +680,9 @@ fn delayed_value(
 /// step size (a quadratic history read back with a 5e-5 error at rtol 1e-6).
 /// The stencil takes the bracketing points and at most one neighbour on each
 /// side, and only across strictly increasing times: an equal-time pair records
-/// a jump, which the stencil never crosses. `None` leaves the linear form.
+/// a jump, which the stencil never crosses, and a neighbour within roundoff
+/// of its stencil point would enter with weights of order 1/ulp. `None`
+/// leaves the linear form.
 fn smooth_interpolation(
     points: &[DelayPoint],
     upper: usize,
@@ -690,6 +693,7 @@ fn smooth_interpolation(
     let mut stencil = Vec::with_capacity(4);
     if let Some(before) = lower.checked_sub(1).map(|index| points[index])
         && before.time < points[lower].time
+        && !delay_time_matches(before.time, points[lower].time)
     {
         stencil.push(before);
     }
@@ -700,6 +704,7 @@ fn smooth_interpolation(
     if let Some(after) = points.get(upper + 1).copied()
         && upper < points.len()
         && after.time > next.time
+        && !delay_time_matches(after.time, next.time)
     {
         stencil.push(after);
     }
@@ -740,12 +745,28 @@ fn append_accepted_point(
         return false;
     }
     let changed = value.to_bits() != last.value.to_bits();
-    // Accepted samples are the authoritative history timeline. Only the exact
-    // same timestamp denotes an event left/right pair; a relative tolerance
-    // would merge distinct samples at large absolute times.
-    if time == last.time {
-        if changed {
-            channel.points.push(DelayPoint { time, value });
+    // Accepted samples are the authoritative history timeline. The same
+    // timestamp denotes an event left/right pair; so does one within the
+    // roundoff of the coordinate (`delay_time_matches`, two ulps), where a
+    // host held the left limit at the accepted step's end and settles the
+    // event a few ulps later (`time > 1` stepped onto 1.0). Recorded at the
+    // left limit's time, the pair stays an exact jump: two points an ulp
+    // apart would otherwise enter the interpolation stencil with weights of
+    // order 1/ulp. A relative tolerance would merge distinct samples at large
+    // absolute times, which two ulps never do.
+    if time == last.time || delay_time_matches(time, last.time) {
+        // A second sample at one instant is an event's right limit. It is
+        // kept even when unchanged: the pair marks the event, which the
+        // smooth stencil never reaches across, since a source's slope may
+        // jump there (a lag driven by a step) and a cubic through the kink
+        // would overshoot on both sides.
+        let points = active_points(channel);
+        let paired = points.len() >= 2 && points[points.len() - 2].time == last.time;
+        if changed || !paired {
+            channel.points.push(DelayPoint {
+                time: last.time,
+                value,
+            });
         }
         return changed;
     }
@@ -1208,6 +1229,76 @@ mod tests {
         );
         let value = delayed_value(&channel, 1.0, 0.5, quadratic(1.5), false);
         assert!((value - quadratic(0.5)).abs() <= 1.0e-14, "{value}");
+    }
+
+    /// A host that holds an event's left limit at the accepted step's end
+    /// (1.0) and settles its right limit an ulp later records one jump at
+    /// 1.0: read before it, the history is the left value, not a stencil
+    /// through two points an ulp apart (values of order 1e15).
+    #[test]
+    fn an_event_pair_a_roundoff_apart_is_one_jump() {
+        let mut channel = DelayChannelHistory {
+            points: vec![
+                DelayPoint {
+                    time: 0.0,
+                    value: 0.0,
+                },
+                DelayPoint {
+                    time: 1.0,
+                    value: 0.0,
+                },
+            ],
+            delay_time: 2.0,
+            delay_max: 2.0,
+            ..DelayChannelHistory::default()
+        };
+        let right = f64::from_bits(1.0_f64.to_bits() + 1);
+        assert!(append_accepted_point(&mut channel, right, 1.0, false));
+        assert_eq!(active_points(&channel)[2].time, 1.0);
+        assert!(!append_accepted_point(&mut channel, 1.5, 1.0, false));
+        for (time, expected) in [(2.1, 0.0), (2.9, 0.0), (3.0, 1.0), (3.1, 1.0), (3.4, 1.0)] {
+            let value = delayed_value(&channel, time, 2.0, 1.0, false);
+            assert_eq!(value, expected, "delayed value at {time}");
+        }
+        // (at 3.0 itself the right limit, as for an exact pair)
+        // the stencil itself leaves out a neighbour within roundoff
+        let points = [
+            DelayPoint {
+                time: 0.0,
+                value: 0.0,
+            },
+            DelayPoint {
+                time: 1.0,
+                value: 0.0,
+            },
+            DelayPoint {
+                time: right,
+                value: 1.0,
+            },
+        ];
+        assert_eq!(smooth_interpolation(&points, 1, points[1], 0.1), None);
+    }
+
+    /// An event's right limit equal to its left one still marks the instant:
+    /// a lag driven by a step has a kink there, and the cubic stays on its side.
+    #[test]
+    fn an_unchanged_event_instant_keeps_the_stencil_on_its_side() {
+        let point = |time: f64, value: f64| DelayPoint { time, value };
+        let mut channel = DelayChannelHistory {
+            points: vec![point(0.0, 0.0), point(0.5, 0.0), point(1.0, 0.0)],
+            delay_time: 2.0,
+            delay_max: 2.0,
+            ..DelayChannelHistory::default()
+        };
+        assert!(!append_accepted_point(&mut channel, 1.0, 0.0, false));
+        assert_eq!(active_points(&channel).len(), 4);
+        // a third sample at the same instant adds nothing
+        assert!(!append_accepted_point(&mut channel, 1.0, 0.0, false));
+        assert_eq!(active_points(&channel).len(), 4);
+        for (time, value) in [(1.2, 0.4), (1.5, 0.8)] {
+            assert!(!append_accepted_point(&mut channel, time, value, false));
+        }
+        assert_eq!(delayed_value(&channel, 2.8, 2.0, 0.0, false), 0.0);
     }
 
     #[test]
