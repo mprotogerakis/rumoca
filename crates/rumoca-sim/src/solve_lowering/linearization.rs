@@ -29,9 +29,10 @@ const SETTLE: AlgebraicSettle = AlgebraicSettle {
 #[derive(Debug, Clone, Default)]
 pub struct LinearizationRequest {
     pub t: f64,
-    /// Operating state by name (a selected state coordinate by the variable
-    /// it stands for, or as `$state_coordinates[i]`); an unset state keeps its
-    /// model initial value.
+    /// Operating state by name, as [`Linearization::states`] names it (a
+    /// selected state coordinate by the variable it stands for; its
+    /// `$state_coordinates[i]` numbers it within one compile only, so it is
+    /// not a state's name); an unset state keeps its model initial value.
     pub states: Vec<(String, f64)>,
     /// Ignore names in `states` that are not states of this model (a run's
     /// snapshot of every variable) instead of refusing them.
@@ -180,7 +181,10 @@ pub fn trim_dae(
     )?;
     let mut free: Vec<usize> = (0..point.names.len()).collect();
     for name in &request.fixed_states {
-        let fixed = state_index(&point.names, &point.solver_names, name)
+        let fixed = point
+            .names
+            .iter()
+            .position(|state| state == name)
             .ok_or_else(|| not_a_state(name, &point.names))?;
         free.retain(|&index| index != fixed);
     }
@@ -282,9 +286,6 @@ struct OperatingPoint {
     t: f64,
     state: Vec<f64>,
     names: Vec<String>,
-    /// The runtime's names of the states, where a selected coordinate is
-    /// `$state_coordinates[i]`.
-    solver_names: Vec<String>,
     /// The states the request set.
     states_set: Vec<String>,
     /// Where the parameter (and input) seeds start in `[solver-y | parameter]`.
@@ -315,8 +316,10 @@ impl OperatingPoint {
         };
         let solve_model = lower_for_simulation_with_overrides(model, &opts)?;
         let (mut state, solver_names) = resolve_probe_state(&solve_model, &[], "operating point")?;
-        // A selected state coordinate (`$state_coordinates[i]`) goes by the
-        // variable it stands for; either name sets it.
+        // A selected state coordinate goes by the variable it stands for: its
+        // `$state_coordinates[i]` is numbered by this compile, and a snapshot
+        // of another (the run before an analysis point was added) numbers
+        // them otherwise.
         let visible = solve_model.visible_projection();
         let names: Vec<String> = solver_names
             .iter()
@@ -329,7 +332,7 @@ impl OperatingPoint {
             .collect();
         let mut set = vec![false; names.len()];
         for (name, value) in states {
-            match state_index(&names, &solver_names, name) {
+            match names.iter().position(|state| state == name) {
                 Some(index) => (state[index], set[index]) = (*value, true),
                 None if lenient => {}
                 None => return Err(not_a_state(name, &names)),
@@ -349,7 +352,6 @@ impl OperatingPoint {
             t,
             state,
             names,
-            solver_names,
             states_set,
         })
     }
@@ -505,13 +507,6 @@ impl OperatingPoint {
             .map_err(SimulationDiagnosticError::from)?;
         Ok((der, tangent))
     }
-}
-
-fn state_index(names: &[String], solver_names: &[String], name: &str) -> Option<usize> {
-    names
-        .iter()
-        .position(|candidate| candidate == name)
-        .or_else(|| solver_names.iter().position(|candidate| candidate == name))
 }
 
 fn not_a_state(name: &str, names: &[String]) -> SimulationDiagnosticError {
