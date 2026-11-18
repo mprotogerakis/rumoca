@@ -302,12 +302,15 @@ fn first_call_name<'dae>(view: dae::DaeView<'dae>, node: dae::ExpressionView<'da
 }
 
 /// One literal per model-level read of a declaration its own continuous
-/// owner binds to a literal, except the binding's own read.
+/// owner binds to a literal, except the binding's own read, and per read of
+/// a discrete-valued declaration its only owner defines as a constant (an
+/// element read with literal subscripts reads its element).
 pub(super) fn literal_binding_plan(view: dae::DaeView<'_>) -> LiteralPlan {
     let bindings = rumoca_eval_dae::literal_bindings(view);
     let mut plan = vec![None; view.expression_count()];
     let mut values: Vec<Option<Arc<FoldedValue>>> = vec![None; view.variable_count()];
     let mut evaluator = NumericEvaluator::new(view);
+    let discrete = constant_discrete_values(view, &mut evaluator);
     for (index, slot) in plan.iter_mut().enumerate() {
         let Some(id) = view.expression_id(index) else {
             continue;
@@ -315,10 +318,21 @@ pub(super) fn literal_binding_plan(view: dae::DaeView<'_>) -> LiteralPlan {
         let Some(node) = view.expression(id) else {
             continue;
         };
-        let dae::ExpressionOperation::Coordinate(dae::CoordinateView::Algebraic(variable)) =
-            node.operation()
-        else {
-            continue;
+        let variable = match node.operation() {
+            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Algebraic(variable)) => {
+                variable
+            }
+            dae::ExpressionOperation::Coordinate(dae::CoordinateView::DiscreteValue(variable))
+                if node.function_scope().is_none() =>
+            {
+                slot.clone_from(&discrete[dae::VariableId::from(variable).index() as usize]);
+                continue;
+            }
+            dae::ExpressionOperation::Index { base, subscripts } if node.function_scope().is_none() => {
+                *slot = discrete_element(view, &discrete, base, subscripts);
+                continue;
+            }
+            _ => continue,
         };
         let ordinal = dae::VariableId::from(variable).index() as usize;
         let Some(binding) = bindings.get(ordinal).copied().flatten() else {
@@ -359,4 +373,121 @@ fn binding_value<'dae>(
             values,
         })
     })
+}
+
+/// The value of every discrete-valued declaration whose only definition is
+/// one owner equating the whole declaration, at every instant, to an
+/// expression of constant variability: it has that value at every instant
+/// (MLS 3.7 §3.8), so its reads are that literal. A `pre` read is not
+/// replaced; it keeps the initialization semantics of its start value.
+fn constant_discrete_values<'dae>(
+    view: dae::DaeView<'dae>,
+    evaluator: &mut NumericEvaluator<'dae>,
+) -> Vec<Option<Arc<FoldedValue>>> {
+    let mut values = vec![None; view.variable_count()];
+    let mut definitions = vec![0usize; view.variable_count()];
+    // A value an event transaction also assigns is not a constant.
+    for (_, transaction) in view.model_event_transactions() {
+        for target in transaction.targets() {
+            definitions[target.variable() as usize] += 2;
+        }
+    }
+    let owners: Vec<_> = (0..view.discrete_value_owner_count())
+        .filter_map(|index| view.discrete_value_owner(view.discrete_value_owner_id(index)?))
+        .collect();
+    for owner in &owners {
+        for target in owner.targets().iter() {
+            definitions[dae::VariableId::from(target).index() as usize] += 1;
+        }
+    }
+    for owner in owners {
+        let mut targets = owner.targets().iter();
+        let (Some(target), None) = (targets.next(), targets.next()) else {
+            continue;
+        };
+        let ordinal = dae::VariableId::from(target).index() as usize;
+        let mut branches = owner.branches().iter();
+        let (Some(branch), None) = (branches.next(), branches.next()) else {
+            continue;
+        };
+        let mut branch_values = branch.values().iter();
+        let (Some((value, _)), None) = (branch_values.next(), branch_values.next()) else {
+            continue;
+        };
+        if definitions[ordinal] != 1
+            || target.scalar_selection().is_some()
+            || !matches!(branch.activation(), dae::DiscreteBranchActivation::Always)
+            || view.expression(value).map(|node| node.variability())
+                != Some(dae::ExpressionVariability::Constant)
+        {
+            continue;
+        }
+        let Some(variable) = view.variable(target.into()) else {
+            continue;
+        };
+        let evaluated = match owner.structure().map(|structure| structure.scalar_view()) {
+            None | Some(rumoca_core::ComprehensionScalarView::RowMajorProjection) => {
+                evaluator.exact_expression_values(value)
+            }
+            Some(rumoca_core::ComprehensionScalarView::BinderSubstitution) => {
+                let domain = owner.structure().expect("structured owner").domain();
+                evaluator.exact_domain_values(domain, value)
+            }
+            Some(_) => continue,
+        };
+        let value_type = variable.value_type();
+        if let Ok(evaluated) = evaluated
+            && Some(evaluated.len()) == value_type.scalar_count()
+            && super::evaluable_parameters::representable_runs(value_type.scalar_type(), &evaluated)
+        {
+            values[ordinal] = Some(Arc::new(FoldedValue {
+                scalar: value_type.scalar_type(),
+                dimensions: value_type.dimensions().into(),
+                values: evaluated,
+            }));
+        }
+    }
+    values
+}
+
+/// The element a read `base[k, ...]` with literal subscripts selects from a
+/// constant discrete-valued declaration.
+fn discrete_element<'dae>(
+    view: dae::DaeView<'dae>,
+    discrete: &[Option<Arc<FoldedValue>>],
+    base: dae::ExprId<'dae>,
+    subscripts: dae::SubscriptsView<'dae>,
+) -> Option<Arc<FoldedValue>> {
+    let dae::ExpressionOperation::Coordinate(dae::CoordinateView::DiscreteValue(variable)) =
+        view.expression(base)?.operation()
+    else {
+        return None;
+    };
+    let value = discrete
+        .get(dae::VariableId::from(variable).index() as usize)?
+        .as_ref()?;
+    if subscripts.len() != value.dimensions.len() {
+        return None;
+    }
+    let mut offset = 0usize;
+    for (subscript, &extent) in subscripts.iter().zip(value.dimensions.iter()) {
+        let dae::SubscriptView::Index { expression, .. } = subscript else {
+            return None;
+        };
+        let dae::ExpressionOperation::Literal(dae::DaeLiteral::Integer(position)) =
+            view.expression(expression)?.operation()
+        else {
+            return None;
+        };
+        let position = usize::try_from(*position).ok()?.checked_sub(1)?;
+        if position >= extent as usize {
+            return None;
+        }
+        offset = offset * extent as usize + position;
+    }
+    Some(Arc::new(FoldedValue {
+        scalar: value.scalar,
+        dimensions: Box::new([]),
+        values: value.values.slice(offset, 1)?,
+    }))
 }

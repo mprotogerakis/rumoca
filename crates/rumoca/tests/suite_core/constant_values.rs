@@ -480,3 +480,46 @@ end ArrayGuards;
     assert_eq!(samples("switchedOutput").first(), Some(&3.0));
     assert_eq!(samples("switchedOutput").last(), Some(&5.0));
 }
+
+/// `Modelica.Fluid`'s vessel ports: `regularFlow = fluidLevel >= height` with
+/// a literal level and height selects the pressure equation of an if-equation
+/// whose other branch is `w = 0`. Read as the constant it is, the branch
+/// condition settles, `p` is fixed by `time`, and `x = 2*p` reduces the index;
+/// read as a discrete unknown, `w` is matched to a row it does not appear in.
+const DISCRETE_CONSTANT_BRANCH: &str = "
+model DiscreteConstantBranch
+  Real level = 0;
+  Boolean regular;
+  Real x;
+  Real p;
+  Real w;
+equation
+  regular = level >= 0;
+  der(x) = w;
+  x = 2*p;
+  if regular then
+    p = 1 + time;
+  else
+    w = 0;
+  end if;
+end DiscreteConstantBranch;";
+
+#[test]
+fn a_discrete_value_defined_by_a_constant_is_read_as_that_constant() {
+    let compiled = Compiler::new()
+        .model("DiscreteConstantBranch")
+        .compile_str(DISCRETE_CONSTANT_BRANCH, "DiscreteConstantBranch.mo")
+        .expect("the model is well formed");
+    let options = SimOptions {
+        t_end: 1.0,
+        ..SimOptions::default()
+    };
+    let result = simulate_dae_with_diagnostics(&compiled.dae, &options)
+        .expect("the selected branch simulates");
+    let last = |name: &str| {
+        let index = result.names.iter().position(|n| n == name).expect(name);
+        *result.data[index].last().expect("a sample")
+    };
+    assert!((last("x") - 4.0).abs() < 1e-6, "x(1) = {}", last("x"));
+    assert!((last("w") - 2.0).abs() < 1e-6, "w(1) = {}", last("w"));
+}
