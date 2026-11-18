@@ -54,15 +54,32 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                             rhs,
                         )
                 }
-                dae::ExpressionOperation::Builtin { builtin, .. } => {
-                    super::super::builtin_profiles::is_differentiable_builtin(builtin, order)
+                dae::ExpressionOperation::Builtin {
+                    builtin: dae::PureBuiltin::Min | dae::PureBuiltin::Max,
+                    arguments,
+                } => {
+                    arguments.len() == 2
+                        && arguments.iter().all(|argument| {
+                            self.source
+                                .expression(argument)
+                                .is_some_and(|node| node.value_type().dimensions().is_empty())
+                        })
                 }
+                dae::ExpressionOperation::Builtin { builtin, .. } => {
+                    builtin == dae::PureBuiltin::Smooth
+                        || super::super::builtin_profiles::is_differentiable_builtin(builtin, order)
+                }
+                // A conditional inside `smooth` is continuous where its guard
+                // switches, so it differentiates branch-wise (as Dymola does
+                // with a medium's `smooth(0, if T < Tlimit ...)`); a bare live
+                // guard keeps the refusal.
                 dae::ExpressionOperation::Conditional(operands) => {
-                    super::super::parameter_conditionals::has_parameter_guards(
-                        self.source,
-                        &self.function_context,
-                        operands,
-                    )
+                    self.within_smooth
+                        || super::super::parameter_conditionals::has_parameter_guards(
+                            self.source,
+                            &self.function_context,
+                            operands,
+                        )
                 }
                 dae::ExpressionOperation::Index { subscripts, .. } => {
                     subscripts.iter().all(|subscript| match subscript {
