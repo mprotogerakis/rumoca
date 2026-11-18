@@ -671,6 +671,7 @@ impl SolveRuntime {
             compiled_event_action_rows: RefCell::new(FxHashMap::default()),
             failed_event_action_rows: RefCell::new(BTreeSet::new()),
             causal_seed_schedules,
+            algebraic_causal_seed_schedules: std::cell::OnceCell::new(),
             compiled_assignment_schedules,
             refresh_target_slices: RefCell::new(FxHashMap::default()),
             interpreted_assignment_schedules,
