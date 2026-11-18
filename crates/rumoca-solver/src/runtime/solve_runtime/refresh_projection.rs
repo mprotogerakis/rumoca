@@ -1551,14 +1551,30 @@ impl ScalarExecutionView<'_> {
                 RuntimeSolveError::solve_ir(format!("folding stage matrix rejected: {error:?}"))
             },
         )?;
+        // (each column in units of its variable: its value's magnitude, at least
+        // its declared scale)
+        let column_scales = group_cols
+            .iter()
+            .map(|&col| {
+                let value = solver_y.get(col).copied().unwrap_or(0.0).abs();
+                let scale = self.runtime.model.solver_variable_scale(col);
+                if value.is_finite() {
+                    value.max(scale)
+                } else {
+                    scale
+                }
+            })
+            .collect::<Vec<_>>();
         chart_dependent_positions
             .iter()
             .map(|dependent| {
-                stage.dependent_conditioning(dependent).map_err(|error| {
-                    RuntimeSolveError::solve_ir(format!(
-                        "reduced-chart dependent conditioning failed: {error:?}"
-                    ))
-                })
+                stage
+                    .dependent_conditioning_scaled(dependent, &column_scales)
+                    .map_err(|error| {
+                        RuntimeSolveError::solve_ir(format!(
+                            "reduced-chart dependent conditioning failed: {error:?}"
+                        ))
+                    })
             })
             .collect()
     }

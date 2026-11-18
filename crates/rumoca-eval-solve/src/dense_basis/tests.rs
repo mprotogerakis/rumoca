@@ -121,3 +121,49 @@ fn thin_svd_correction_matches_the_nalgebra_pseudo_inverse_and_repeats_exactly()
         );
     }
 }
+
+/// An equation's unit is arbitrary: a row in J beside a row in kg must not
+/// read a regular basis as singular (a drum boiler's energy balance beside a
+/// steam volume's mass balance).
+#[test]
+fn rows_of_different_units_select_the_same_basis() {
+    let matrix = DenseStageMatrix::new(2, 3, &[1e9, 0., 0., 0., 1e-9, 1e-9]).unwrap();
+    let choices = [
+        ColumnChoice::Eligible(0),
+        ColumnChoice::Eligible(0),
+        ColumnChoice::Independent,
+    ];
+    assert_eq!(matrix.independent_columns(&choices).unwrap(), [2]);
+    let rescaled = DenseStageMatrix::new(2, 3, &[1., 0., 0., 0., 1., 1.]).unwrap();
+    assert_eq!(rescaled.independent_columns(&choices).unwrap(), [2]);
+}
+
+/// A drum boiler's chart (`m` and `U` reconstructed from `p` and `V_l`, at
+/// 24 bar): regular, although its identity block measured against
+/// dU/dV_l ~ 8e8 J/m3 in raw units sits at the regular bound. In units of
+/// its variables it is far from a fold; a collapsing dependent column still
+/// reads as one.
+#[test]
+fn scaled_conditioning_reads_a_drum_chart_as_regular_and_a_fold_as_a_fold() {
+    let values = [0., -838.66, 1., 0., 2., -7.9613e8, 0., 1.];
+    let chart = DenseStageMatrix::new(2, 4, &values).unwrap();
+    let scales = [2.37e6, 0.9, 1.4e3, 1.6e9];
+    let raw = chart.dependent_conditioning(&[2, 3]).unwrap();
+    // (within a factor two of the regular bound, 1e6 times the singular threshold)
+    assert!(raw.rcond < 2e6 * raw.singular_threshold, "{}", raw.rcond);
+    let scaled = chart
+        .dependent_conditioning_scaled(&[2, 3], &scales)
+        .unwrap();
+    assert!(scaled.rcond > 0.1, "{}", scaled.rcond);
+    let mut folding = values;
+    folding[7] = 1e-30;
+    let folded = DenseStageMatrix::new(2, 4, &folding).unwrap();
+    let folded = folded
+        .dependent_conditioning_scaled(&[2, 3], &scales)
+        .unwrap();
+    assert!(folded.rcond < folded.singular_threshold, "{}", folded.rcond);
+    assert_eq!(
+        chart.dependent_conditioning_scaled(&[2, 3], &scales[..3]),
+        Err(DenseBasisError::Shape)
+    );
+}
