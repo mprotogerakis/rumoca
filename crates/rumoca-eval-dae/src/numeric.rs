@@ -162,6 +162,18 @@ where
     ) -> Result<SourceValues, NumericEvaluationError> {
         self.source_values(id)
     }
+    /// Evaluate `body` once per point of `domain`, in its row-major order:
+    /// the values of a structured owner's body over its whole declaration.
+    pub fn exact_domain_values(
+        &mut self,
+        domain: dae::DomainId<'dae>,
+        body: dae::ExprId<'dae>,
+    ) -> Result<SourceValues, NumericEvaluationError> {
+        let span = self.expression_span(body);
+        Ok(NumericInitialValues::literal(
+            self.comprehension(domain, body, span)?,
+        ))
+    }
     pub fn with_overrides(view: dae::DaeView<'dae>, override_value: F) -> Self {
         Self::with_input_policy(
             view,
