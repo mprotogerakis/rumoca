@@ -3,6 +3,7 @@
 //! grouping rules.
 
 mod fourbar_connect_order;
+mod linearization_msl;
 mod move_supplied_derivative;
 mod msl_sim_regression;
 mod post_commit_projection;
