@@ -94,7 +94,7 @@ impl<T: Copy> NumericInitialValues<T> {
         self.count += other.count;
         self.runs.append(&mut other.runs);
     }
-    pub(super) fn slice(&self, start: usize, count: usize) -> Option<Self> {
+    pub fn slice(&self, start: usize, count: usize) -> Option<Self> {
         let end = start.checked_add(count)?;
         if end > self.count {
             return None;
