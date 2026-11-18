@@ -29,8 +29,8 @@ use scaling::{
     CertificateScales, OriginRowScales, algebraic_block_scales, algebraic_plan_row_scales,
     fallback_targets, initial_block_fallback_scales, initial_residual_scales, jacobian_row_derived,
     jacobian_row_magnitudes, jacobian_row_scales, model_variable_scale,
-    origin_bounded_residual_converged, scaled_correction_converged, scaled_residual_converged,
-    scaled_residual_norm, scaled_tolerance,
+    origin_bounded_residual_converged, scaled_correction_converged, scaled_jacobian,
+    scaled_residual_converged, scaled_residual_norm, scaled_tolerance, valid_variable_scale,
 };
 pub(crate) use scaling::{ScaledNewtonSystem, scaled_newton_delta, scaled_newton_delta_with_cache};
 pub(crate) use scaling::{scaled_newton_delta_issued_torn, scaled_newton_delta_with_tearing};
