@@ -383,6 +383,16 @@ impl InitialProjectionModel<'_> {
     /// outside it that is undefined at the point (an enthalpy `h` of
     /// `H = m*h` at a startless zero mass `m`, before the block that projects
     /// `m` has run) never fails their evaluation.
+    ///
+    /// The view is an inner solve of the initial Newton, and an initial row
+    /// can be far more sensitive to a refreshed coordinate than that
+    /// coordinate's own block is: an incompressible volume's `der(T)` moves
+    /// with a mass-flow imbalance the flow block calls converged. Stopped at
+    /// the outer tolerance, the refresh would leave those rows with an error
+    /// the outer Newton cannot remove, and constant under its small steps.
+    /// So the view settles to the square of that tolerance (at quadratic
+    /// convergence one correction more), and to the tolerance itself where
+    /// rounding stops a block short of the square.
     fn settled_initial_coordinates(
         &self,
         y: &[f64],
@@ -393,6 +403,22 @@ impl InitialProjectionModel<'_> {
         let mut settled_y = y.to_vec();
         let mut settled_p = p.to_vec();
         let subset = blocks.map(|blocks| self.runtime.refresh_block_subset(blocks));
+        let refresh = |settled_y: &mut [f64], settled_p: &[f64], tol: f64| match &subset {
+            Some((plan, indices)) => self.runtime.refresh_algebraic_block_subset(
+                (plan, indices),
+                t,
+                settled_y,
+                settled_p,
+                (tol, self.max_iters),
+            ),
+            None => self.runtime.refresh_algebraic_and_output_slots(
+                t,
+                settled_y,
+                settled_p,
+                tol,
+                self.max_iters,
+            ),
+        };
         for pass in 0..self.max_iters {
             let changed = self.runtime.apply_initialization_updates(
                 &mut settled_y,
@@ -401,22 +427,8 @@ impl InitialProjectionModel<'_> {
                 self.tol,
                 self.max_iters,
             )?;
-            match &subset {
-                Some((plan, indices)) => self.runtime.refresh_algebraic_block_subset(
-                    (plan, indices),
-                    t,
-                    &mut settled_y,
-                    &settled_p,
-                    (self.tol, self.max_iters),
-                )?,
-                None => self.runtime.refresh_algebraic_and_output_slots(
-                    t,
-                    &mut settled_y,
-                    &settled_p,
-                    self.tol,
-                    self.max_iters,
-                )?,
-            }
+            refresh(&mut settled_y, &settled_p, self.tol * self.tol)
+                .or_else(|_| refresh(&mut settled_y, &settled_p, self.tol))?;
             if pass > 0 && !changed {
                 return Ok((settled_y, settled_p));
             }
