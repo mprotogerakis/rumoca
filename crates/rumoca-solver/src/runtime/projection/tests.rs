@@ -1628,6 +1628,110 @@ impl AlgebraicProjectionModel for ScaledResidualProjectionModel {
     }
 }
 
+/// `p - 1 = 0` and `p*(T - 2) = 0`: a flow `p` that starts at roundoff
+/// leaves `T` undetermined there, as a loop with equal start pressures does
+/// a volume's steady energy balance.
+struct ZeroFlowStartModel;
+
+impl ImplicitProjectionModel for ZeroFlowStartModel {
+    fn eval_residual(
+        &self,
+        y: &[f64],
+        _p: &[f64],
+        _t: f64,
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        out[0] = y[0] - 1.0;
+        out[1] = y[0] * (y[1] - 2.0);
+        Ok(())
+    }
+
+    fn eval_jacobian_v(
+        &self,
+        y: &[f64],
+        _p: &[f64],
+        _t: f64,
+        v: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        out[0] = v[0];
+        out[1] = (y[1] - 2.0) * v[0] + y[0] * v[1];
+        Ok(())
+    }
+
+    fn implicit_target(&self, row_idx: usize) -> Option<solve::ScalarSlot> {
+        Some(solve::scalar_slot_y(row_idx))
+    }
+
+    fn algebraic_projection_plan(&self) -> &solve::AlgebraicProjectionPlan {
+        static PLAN: std::sync::OnceLock<solve::AlgebraicProjectionPlan> =
+            std::sync::OnceLock::new();
+        PLAN.get_or_init(|| solve::AlgebraicProjectionPlan {
+            blocks: (vec![solve::AlgebraicProjectionBlock {
+                rows: vec![0, 1],
+                y_indices: vec![0, 1],
+                tearing: None,
+                alternate_charts: Vec::new(),
+            }])
+            .into(),
+        })
+    }
+}
+
+impl AlgebraicProjectionModel for ZeroFlowStartModel {
+    fn eval_initial_residual(
+        &self,
+        y: &[f64],
+        p: &[f64],
+        t: f64,
+        _rows: Option<&[usize]>,
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        self.eval_residual(y, p, t, out)
+    }
+
+    fn eval_initial_jacobian_v(
+        &self,
+        y: &[f64],
+        p: &[f64],
+        t: f64,
+        v: &[f64],
+        _rows: Option<&[usize]>,
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        self.eval_jacobian_v(y, p, t, v, out)
+    }
+
+    fn initial_residual_len(&self) -> usize {
+        2
+    }
+
+    fn initial_target(&self, _row_idx: usize) -> Option<solve::ScalarSlot> {
+        None
+    }
+}
+
+#[test]
+fn initial_newton_moves_the_determined_directions_from_a_zero_flow_start() {
+    let model = ZeroFlowStartModel;
+    let mut y = vec![1.0e-14, 0.0];
+
+    project_initial_y_plan(
+        &model,
+        &mut y,
+        &[],
+        0.0,
+        model.algebraic_projection_plan(),
+        1.0e-9,
+    )
+    .expect("the flow, once moved, determines the temperature");
+
+    assert!(
+        (y[0] - 1.0).abs() <= 1.0e-9 && (y[1] - 2.0).abs() <= 1.0e-9,
+        "{y:?}"
+    );
+}
+
 #[test]
 fn project_initial_block_rejects_rectangular_inventory() {
     let model = RectInitialProjectionModel;

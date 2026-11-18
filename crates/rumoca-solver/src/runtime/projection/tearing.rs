@@ -538,7 +538,8 @@ fn residual_rows_at_rounding<M: ImplicitProjectionModel>(
         .copied()
         .chain(tearing.causal_steps.iter().map(|step| step.y_index))
         .collect();
-    let jacobian = algebraic_block_jacobian(model, y, p, t, &tearing.residual_rows, &unknowns, None)?;
+    let jacobian =
+        algebraic_block_jacobian(model, y, p, t, &tearing.residual_rows, &unknowns, None)?;
     let scales: Vec<f64> = unknowns
         .iter()
         .map(|&index| model_variable_scale(model, index, y[index]))
