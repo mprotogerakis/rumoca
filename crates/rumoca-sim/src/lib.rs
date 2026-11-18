@@ -177,8 +177,9 @@ pub use solve_lowering::{
     steady_state_parameter_sensitivity_for_dae, structural_report_for_dae,
 };
 pub use solve_lowering::{
-    ExcludedParameter, ExclusionReason, Linearization, ParameterClassification,
-    independent_tunable_parameters, linearization_for_dae, select_sensitivity_parameters,
+    ExcludedParameter, ExclusionReason, Linearization, LinearizationRequest,
+    ParameterClassification, TrimRequest, TrimResult, independent_tunable_parameters,
+    linearization_for_dae, linearize_dae, select_sensitivity_parameters, trim_dae,
 };
 #[cfg(feature = "fmi")]
 pub use solve_lowering::{
