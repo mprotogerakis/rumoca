@@ -228,9 +228,10 @@ fn select_structural_if_branch<'a>(
     };
     let eval_ctx = eval_ctx?;
     if !if_selection_is_grounded(cond_blocks, else_block.as_deref())
-        || cond_blocks
-            .iter()
-            .any(|block| names_possibly_non_evaluable(eval_ctx, &block.cond))
+        || cond_blocks.iter().any(|block| {
+            names_possibly_non_evaluable(eval_ctx, &block.cond)
+                || reads_outer_element(eval_ctx, &block.cond, 0)
+        })
     {
         return None;
     }
@@ -271,6 +272,37 @@ fn names_possibly_non_evaluable(
                             .is_some()
                 })
         })
+}
+
+/// Whether `condition` reads an `outer` element, directly or through the
+/// bindings of this class's components. Its value is the matching `inner`'s
+/// (MLS §5.4), not its declaring class's default, so the selection is left to
+/// flatten, which reads it from the inner instance.
+fn reads_outer_element(
+    eval_ctx: &InstantiateEvalCtx<'_>,
+    condition: &ast::Expression,
+    depth: usize,
+) -> bool {
+    const MAX_BINDING_HOPS: usize = 8;
+    depth < MAX_BINDING_HOPS
+        && ast::collect_component_refs(condition)
+            .iter()
+            .any(|reference| {
+                let Some(first) = reference.parts.first() else {
+                    return false;
+                };
+                let name = first.ident.text.as_ref();
+                eval_ctx.mod_env.get(&ast::QualifiedName::from_ident(name)).is_none()
+                    && eval_ctx
+                        .effective_components
+                        .get(name)
+                        .is_some_and(|component| {
+                            component.outer
+                                || component.binding.as_ref().is_some_and(|binding| {
+                                    reads_outer_element(eval_ctx, binding, depth + 1)
+                                })
+                        })
+            })
 }
 
 /// True when an if-equation may be decided at instantiation time: either every
