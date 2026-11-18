@@ -119,7 +119,8 @@ fn whole_declaration<'dae>(
     })
 }
 
-/// A numeric literal, or arrays and unary signs of literal structure.
+/// A numeric literal, or arrays, unary signs and `zeros`/`ones`/`fill`
+/// constructors of literal structure.
 pub(crate) fn is_literal_structure<'dae>(
     view: dae::DaeView<'dae>,
     expression: dae::ExprId<'dae>,
@@ -135,7 +136,11 @@ pub(crate) fn is_literal_structure<'dae>(
             operator: dae::UnaryOperator::Plus | dae::UnaryOperator::Negate,
             operand,
         } => is_literal_structure(view, operand),
-        dae::ExpressionOperation::Array(elements) => elements
+        dae::ExpressionOperation::Array(elements)
+        | dae::ExpressionOperation::Builtin {
+            builtin: dae::PureBuiltin::Zeros | dae::PureBuiltin::Ones | dae::PureBuiltin::Fill,
+            arguments: elements,
+        } => elements
             .iter()
             .all(|element| is_literal_structure(view, element)),
         _ => false,
