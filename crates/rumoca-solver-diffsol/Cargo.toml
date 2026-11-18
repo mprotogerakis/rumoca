@@ -11,7 +11,12 @@ homepage.workspace = true
 # The backend implements only rumoca-solver's FMI ME numerical-plugin
 # interface; simulation orchestration and model construction live upstream.
 rumoca-solver = { workspace = true }
-diffsol = { version = "0.13" }
+# The maintained 0.13.2 fork carries the BDF corrections this backend needs
+# (docs/dev-guide/src/runtime/diffsol-maintenance.md). A `[patch.crates-io]`
+# reaches only builds rooted in this workspace; an application that depends on
+# rumoca by git or path would get the registry release, whose accepted BDF state
+# disagrees with its own continuous extension.
+diffsol = { git = "https://github.com/CogniPilot/diffsol", rev = "4a8aebb83e088cc454d1716c81768eb36386292f" }
 self_cell = { workspace = true }
 
 [lints]
