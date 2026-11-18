@@ -221,30 +221,34 @@ fn lower_guesses<'formal>(
             }
         }
     }
-    definitions
+    // A guess only seeds a trial value: a definition its program cannot be
+    // lowered for leaves its target at its start value.
+    let mut guesses = Vec::new();
+    for &target in definitions
         .order()
         .iter()
         .filter(|target| needed.contains(&target.index()))
-        .map(|&target| {
-            let expression = definitions
-                .definition(target)
-                .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-            let at = view
-                .expression(expression)
+    {
+        let expression = definitions
+            .definition(target)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
+        let at = view
+            .expression(expression)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+            .provenance()
+            .span();
+        let body = FormalExpressionBody {
+            value: expression,
+            value_type: view
+                .variable(target.into())
                 .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
-                .provenance()
-                .span();
-            let body = FormalExpressionBody {
-                value: expression,
-                value_type: view
-                    .variable(target.into())
-                    .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
-                    .value_type_id(),
-            };
-            let program = registry.formal_expressions(view, vec![body], None, homotopy, at)?;
-            Ok(FormalCausalGuess { target, program })
-        })
-        .collect()
+                .value_type_id(),
+        };
+        if let Ok(program) = registry.formal_expressions(view, vec![body], None, homotopy, at) {
+            guesses.push(FormalCausalGuess { target, program });
+        }
+    }
+    Ok(guesses)
 }
 
 fn owner_bodies<'formal>(
