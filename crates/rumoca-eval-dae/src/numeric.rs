@@ -408,9 +408,32 @@ where
     ) -> Result<SourceValues, NumericEvaluationError> {
         let mut values = SourceValues::default();
         for field in fields.iter() {
-            values.append(self.source_values(field)?);
+            values.append(self.operand_values(field)?);
         }
         Ok(values)
+    }
+
+    /// The lanes of one call argument or record field.
+    ///
+    /// Text carries no numeric value (the runtime owns no String storage), so
+    /// a String operand, such as the `name` of an
+    /// `IdealGases.Common.DataRecord`, holds its lanes unread: the checked
+    /// DAE reads text only as text, which this evaluator never executes.
+    fn operand_values(
+        &mut self,
+        operand: dae::ExprId<'dae>,
+    ) -> Result<SourceValues, NumericEvaluationError> {
+        let value_type = self
+            .view
+            .expression(operand)
+            .expect("finalized expression identity resolves")
+            .value_type();
+        if value_type.scalar_type() == dae::ScalarType::String
+            && let Some(count) = value_type.scalar_count()
+        {
+            return Ok(NumericInitialValues::repeat(Scalar::Integer(0), count));
+        }
+        self.source_values(operand)
     }
 
     fn record_field(
@@ -700,7 +723,7 @@ where
         }
         let arguments = arguments
             .iter()
-            .map(|argument| self.source_values(argument))
+            .map(|argument| self.operand_values(argument))
             .collect::<Result<Vec<_>, _>>()?;
         let definition = self.view.function(function).ok_or_else(|| {
             failure(
