@@ -110,7 +110,20 @@ impl DenseStageMatrix {
 
     /// Choose a complete dependent basis and return its independent complement.
     /// Reorthogonalized pivoting respects required columns and preference groups.
+    ///
+    /// The rank decisions read the stage with each row divided by its largest
+    /// magnitude: a row is an equation, and its scale is arbitrary. Unscaled,
+    /// an energy balance in J beside a mass balance in kg (a drum boiler's
+    /// `U` and `m` beside a steam volume's) makes the small rows fall below the
+    /// pivot threshold of the large ones, and a regular basis reads singular.
     pub fn independent_columns(
+        &self,
+        choices: &[ColumnChoice],
+    ) -> Result<Vec<usize>, DenseBasisError> {
+        Self(row_equilibrated(&self.0)).independent_columns_of_rows(choices)
+    }
+
+    fn independent_columns_of_rows(
         &self,
         choices: &[ColumnChoice],
     ) -> Result<Vec<usize>, DenseBasisError> {
@@ -221,22 +234,54 @@ impl DenseStageMatrix {
         &self,
         dependent: &[usize],
     ) -> Result<DependentConditioning, DenseBasisError> {
-        if self.0.nrows() == 0 || self.0.ncols() == 0 {
+        Self::conditioning_of(&self.0, dependent)
+    }
+
+    /// [`Self::dependent_conditioning`] in relative units: each column times
+    /// its variable's magnitude `column_scales[c]`, then each row divided by
+    /// its largest entry. A column is a variable and a row an equation, and
+    /// neither's unit says anything about a fold: unscaled, a drum boiler's
+    /// chart (`m` and `U` from `p` and `V_l`: kg, J, Pa, m3) measures its
+    /// identity block against dU/dV_l ~ 1e9 J/m3 and reads folded although it
+    /// is regular. A dependent column that collapses still collapses against
+    /// the other columns of its rows, so a real fold is measured as before.
+    pub fn dependent_conditioning_scaled(
+        &self,
+        dependent: &[usize],
+        column_scales: &[f64],
+    ) -> Result<DependentConditioning, DenseBasisError> {
+        if column_scales.len() != self.0.ncols() {
             return Err(DenseBasisError::Shape);
         }
-        if dependent.is_empty() || dependent.len() > self.0.ncols() {
+        let mut scaled = self.0.clone();
+        for (mut column, &scale) in scaled.column_iter_mut().zip(column_scales) {
+            if scale.is_finite() && scale > 0.0 {
+                column *= scale;
+            }
+        }
+        Self::conditioning_of(&row_equilibrated(&scaled), dependent)
+    }
+
+    fn conditioning_of(
+        stage: &DMatrix<f64>,
+        dependent: &[usize],
+    ) -> Result<DependentConditioning, DenseBasisError> {
+        if stage.nrows() == 0 || stage.ncols() == 0 {
             return Err(DenseBasisError::Shape);
         }
-        let mut seen = vec![false; self.0.ncols()];
+        if dependent.is_empty() || dependent.len() > stage.ncols() {
+            return Err(DenseBasisError::Shape);
+        }
+        let mut seen = vec![false; stage.ncols()];
         for &column in dependent {
             let slot = seen.get_mut(column).ok_or(DenseBasisError::Shape)?;
             if std::mem::replace(slot, true) {
                 return Err(DenseBasisError::Shape);
             }
         }
-        let stage_scale = self.0.clone().col_piv_qr().r()[(0, 0)].abs();
-        let block = DMatrix::from_fn(self.0.nrows(), dependent.len(), |r, c| {
-            self.0[(r, dependent[c])]
+        let stage_scale = stage.clone().col_piv_qr().r()[(0, 0)].abs();
+        let block = DMatrix::from_fn(stage.nrows(), dependent.len(), |r, c| {
+            stage[(r, dependent[c])]
         });
         let pivots = block.nrows().min(block.ncols());
         let block_r = block.col_piv_qr().r();
@@ -250,13 +295,25 @@ impl DenseStageMatrix {
         };
         Ok(DependentConditioning {
             rcond,
-            singular_threshold: self.threshold(1.0),
+            singular_threshold: stage.nrows().max(stage.ncols()) as f64 * f64::EPSILON,
         })
     }
 
     fn threshold(&self, scale: f64) -> f64 {
         self.0.nrows().max(self.0.ncols()) as f64 * f64::EPSILON * scale
     }
+}
+
+/// `matrix` with each row divided by its largest magnitude (a zero row kept).
+fn row_equilibrated(matrix: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut scaled = matrix.clone();
+    for mut row in scaled.row_iter_mut() {
+        let largest = row.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        if largest > 0.0 {
+            row /= largest;
+        }
+    }
+    scaled
 }
 
 fn largest_remainder(remaining: &[(usize, DVector<f64>)]) -> Option<(usize, f64)> {
