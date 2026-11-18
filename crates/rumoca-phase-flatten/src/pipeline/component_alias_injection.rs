@@ -396,14 +396,24 @@ type ComponentScopeEntry<'a> = (
     &'a rumoca_ir_ast::InstanceData,
 );
 
+/// Every instantiated component scope. An `outer` element is its `inner`
+/// element (MLS §5.4), so its declaring class's defaults are not injected
+/// under its own path: lookups through it reach the inner's values.
 fn component_scopes_from_overlay(overlay: &InstanceOverlay) -> Vec<ComponentScopeEntry<'_>> {
     overlay
         .components
         .values()
-        .map(|comp| {
+        .filter_map(|comp| {
             let scope_path = comp.qualified_name.to_component_path();
+            if overlay
+                .outer_prefix_to_inner
+                .keys()
+                .any(|outer| scope_path.strip_prefix(outer).is_some())
+            {
+                return None;
+            }
             let scope = scope_path.to_flat_string();
-            (scope_path, scope, comp)
+            Some((scope_path, scope, comp))
         })
         .collect()
 }

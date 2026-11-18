@@ -54,6 +54,22 @@ pub(crate) fn redirect_outer_refs(
     flat.definite_roots = redirected_roots;
 }
 
+/// Redirect the bindings and attributes that read through an `outer` element
+/// to its `inner` element (MLS §5.4: the outer element *is* the inner one)
+/// before translation-time evaluation, which would otherwise read the outer
+/// declaration's class defaults instead of the inner's modified values.
+pub(crate) fn redirect_outer_bindings(
+    flat: &mut flat::Model,
+    outer_to_inner: &IndexMap<ComponentPath, ComponentPath>,
+) {
+    if outer_to_inner.is_empty() {
+        return;
+    }
+    for var in flat.variables.values_mut() {
+        redirect_variable_attributes(var, outer_to_inner);
+    }
+}
+
 fn redirect_variable_attributes(
     var: &mut flat::Variable,
     outer_to_inner: &IndexMap<ComponentPath, ComponentPath>,
