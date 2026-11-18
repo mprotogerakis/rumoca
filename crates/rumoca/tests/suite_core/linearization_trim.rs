@@ -357,3 +357,133 @@ fn two_hundred_states_linearize_well_under_a_second_after_lowering() {
     assert_close(lin.b[0][0], 1.0, 1.0e-12, "B");
     assert_close(lin.c[0][199], 1.3, 1.0e-12, "C");
 }
+
+// ---------------------------------------------------------------------------
+// Selected state coordinates: V and T are preferred over the m and U the
+// balances differentiate, so every state is a `$state_coordinates[i]`, which
+// numbers it within one compile only. With rho = 2, k = 0.5:
+//   der(V) = (qin - k V) / rho,  der(T) = qin (300 - T) / (rho V),
+//   der(I) = V - I,
+// steady at V = qin / k, T = 300, I = V.
+// ---------------------------------------------------------------------------
+
+const COORDINATES: &str = r#"
+model Coordinates
+  parameter Real rho = 2;
+  parameter Real k = 0.5;
+  input Real qin = 1;
+  Real m;
+  Real V(stateSelect = StateSelect.prefer, start = 1, fixed = true);
+  Real U;
+  Real T(stateSelect = StateSelect.prefer, start = 300, fixed = true);
+  Real I(start = 0.5, fixed = true);
+equation
+  m = rho * V;
+  der(m) = qin - k * V;
+  U = m * T;
+  der(U) = qin * 300 - k * V * T;
+  der(I) = V - I;
+end Coordinates;
+"#;
+
+/// A run's snapshot, by name in no model order, with the coordinates of
+/// another compile's numbering, which must not reach this one's states.
+fn coordinates_snapshot() -> Vec<(String, f64)> {
+    [
+        ("$state_coordinates[1]", 0.7),
+        ("I", 0.7),
+        ("$state_coordinates[2]", 1.5),
+        ("T", 310.0),
+        ("m", 3.0),
+        ("V", 1.5),
+        ("$state_coordinates[3]", 310.0),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect()
+}
+
+#[test]
+fn state_coordinates_are_set_and_reported_by_the_variables_they_stand_for() {
+    let result = compile(COORDINATES, "Coordinates");
+    let lin = linearize_dae(
+        &result.dae,
+        &SimOptions::default(),
+        &LinearizationRequest {
+            states: coordinates_snapshot(),
+            lenient_states: true,
+            ..LinearizationRequest::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let at = |name: &str| {
+        lin.states
+            .iter()
+            .position(|state| state == name)
+            .unwrap_or_else(|| panic!("no state {name} in {:?}", lin.states))
+    };
+    let (v, t, i) = (at("V"), at("T"), at("I"));
+    assert_eq!(lin.states_set.len(), 3, "{:?}", lin.states_set);
+    for (index, want) in [(v, 1.5), (t, 310.0), (i, 0.7)] {
+        assert_eq!(lin.state_values[index], want, "{}", lin.states[index]);
+    }
+    for (index, want) in [(v, 0.125), (t, -10.0 / 3.0), (i, 0.8)] {
+        assert_close(
+            lin.state_derivatives[index],
+            want,
+            1.0e-12,
+            &lin.states[index],
+        );
+    }
+    let want_a = [
+        (v, v, -0.25),
+        (v, t, 0.0),
+        (v, i, 0.0),
+        (t, v, -(300.0 - 310.0) / (2.0 * 1.5 * 1.5)),
+        (t, t, -1.0 / (2.0 * 1.5)),
+        (t, i, 0.0),
+        (i, v, 1.0),
+        (i, t, 0.0),
+        (i, i, -1.0),
+    ];
+    for (row, col, want) in want_a {
+        let what = format!("A[{}][{}]", lin.states[row], lin.states[col]);
+        assert_close(lin.a[row][col], want, 1.0e-12, &what);
+    }
+
+    let trim = trim_dae(
+        &result.dae,
+        &SimOptions::default(),
+        &TrimRequest {
+            states: coordinates_snapshot(),
+            lenient_states: true,
+            ..TrimRequest::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(trim.states_set.len(), 3, "{:?}", trim.states_set);
+    for (name, want) in [("V", 2.0), ("T", 300.0), ("I", 2.0)] {
+        let got = trim
+            .states
+            .iter()
+            .find(|(state, _)| state == name)
+            .unwrap_or_else(|| panic!("no state {name} in {:?}", trim.states))
+            .1;
+        assert_close(got, want, 1.0e-9, name);
+    }
+    assert!(trim.residual <= 1.0e-10, "{trim:?}");
+
+    // Strict, the compile-local name is refused with the names that hold.
+    let error = linearize_dae(
+        &result.dae,
+        &SimOptions::default(),
+        &LinearizationRequest {
+            states: vec![("$state_coordinates[1]".into(), 1.0)],
+            ..LinearizationRequest::default()
+        },
+    )
+    .expect_err("a coordinate's compile-local name");
+    for valid in ["V", "T", "I"] {
+        assert!(error.to_string().contains(valid), "{error}");
+    }
+}
