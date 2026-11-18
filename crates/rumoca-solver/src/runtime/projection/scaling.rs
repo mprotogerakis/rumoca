@@ -47,12 +47,9 @@ const RESIDUAL_ROUNDING: f64 = 16.0 * f64::EPSILON;
 /// (`scales`: a row's largest |J_ij| |x_j|).
 pub(super) fn residual_at_rounding(residual: &[f64], scales: &[f64]) -> bool {
     residual.len() == scales.len()
-        && residual
-            .iter()
-            .zip(scales)
-            .all(|(value, scale)| {
-                value.is_finite() && value.abs() <= RESIDUAL_ROUNDING * valid_variable_scale(*scale)
-            })
+        && residual.iter().zip(scales).all(|(value, scale)| {
+            value.is_finite() && value.abs() <= RESIDUAL_ROUNDING * valid_variable_scale(*scale)
+        })
 }
 
 pub(super) fn scaled_residual_norm(residual: &[f64], scales: &[f64]) -> f64 {
