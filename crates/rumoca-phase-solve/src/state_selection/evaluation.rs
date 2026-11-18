@@ -54,7 +54,12 @@ impl TrialPoint {
                 .collect::<Result<Vec<_>, _>>()?;
             let outputs = eval_pure_call(programs.table(), program.site.owner(), &arguments)
                 .map_err(failure)?;
-            check_assertions(program.site.outputs(), &outputs)?;
+            // A definition read at an unseeded input (its start, often zero)
+            // may lie outside its function's domain. It is only a guess: the
+            // target keeps its start value.
+            if check_assertions(program.site.outputs(), &outputs).is_err() {
+                continue;
+            }
             self.values[guess.target.index() as usize] =
                 Some(real_outputs(&outputs[..program.value_outputs])?);
         }
