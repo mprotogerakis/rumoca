@@ -830,8 +830,48 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             Builtin::Atan2 => self.differentiate_atan2_builtin(arguments, order, provenance),
             Builtin::LinearSolve => self.differentiate_linear_solve(arguments, order, provenance),
             Builtin::Smooth => self.differentiate_smooth(arguments, order, provenance),
+            Builtin::Min | Builtin::Max => {
+                self.differentiate_selection(builtin, arguments, order, provenance)
+            }
             _ => unreachable!("differentiability preflight rejects this builtin"),
         }
+    }
+
+    /// `min(a, b)` and `max(a, b)` are one of their arguments, selected by
+    /// comparing them, so their derivative is that argument's, selected by the
+    /// same comparison (piecewise, the way an `if` is differentiated).
+    fn differentiate_selection(
+        &mut self,
+        builtin: dae::PureBuiltin,
+        arguments: dae::ExpressionOperands<'source>,
+        order: u8,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        let (a, b) = (
+            arguments.get(0).expect("checked selection operand"),
+            arguments.get(1).expect("checked selection operand"),
+        );
+        let (da, db) = (
+            self.differentiate_order(a, order, provenance)?,
+            self.differentiate_order(b, order, provenance)?,
+        );
+        if matches!((&da, &db), (Derivative::Zero, Derivative::Zero)) {
+            return Ok(Derivative::Zero);
+        }
+        let da = self.materialize_derivative(da, a, provenance)?;
+        let db = self.materialize_derivative(db, b, provenance)?;
+        let lhs = self.differentiation_value(a, provenance)?;
+        let rhs = self.differentiation_value(b, provenance)?;
+        let selects_a = if builtin == dae::PureBuiltin::Min {
+            dae::BinaryOperator::LessEqual
+        } else {
+            dae::BinaryOperator::GreaterEqual
+        };
+        let guard = self.target.at(provenance).binary(selects_a, lhs, rhs)?;
+        self.target
+            .at(provenance)
+            .conditional([(guard, da)], db)
+            .map(Derivative::Expression)
     }
 
     /// `d^k/dt^k smooth(p, e) = smooth(p - k, d^k e)` (MLS §3.7.5): the
@@ -844,9 +884,10 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
     ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
         let (smoothness, value) = super::smooth_order::smooth_operands(self.source, arguments)
             .expect("differentiability preflight proved a literal smooth order");
-        let Derivative::Expression(derivative) =
-            self.differentiate_order(value, order, provenance)?
-        else {
+        let enclosing = std::mem::replace(&mut self.within_smooth, true);
+        let derivative = self.differentiate_order(value, order, provenance);
+        self.within_smooth = enclosing;
+        let Derivative::Expression(derivative) = derivative? else {
             return Ok(Derivative::Zero);
         };
         let remaining = super::smooth_order::remaining_order(smoothness, order);

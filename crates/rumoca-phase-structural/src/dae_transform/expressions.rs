@@ -74,6 +74,9 @@ pub(super) struct ExpressionRebuilder<'source, 'borrow, 'storage, 'target> {
         &'borrow [Option<std::sync::Arc<super::evaluable_parameters::FoldedValue>>],
     rebuilt: &'borrow mut [Option<dae::ExprId<'target>>],
     pub(super) transforming_model_arm: bool,
+    /// Differentiating the operand of a `smooth`: its conditionals are
+    /// continuous across their guards, so they differentiate branch-wise.
+    pub(super) within_smooth: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +185,7 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             literal_expressions: &[],
             rebuilt,
             transforming_model_arm: false,
+            within_smooth: false,
         }
     }
 
