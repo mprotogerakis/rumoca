@@ -6,7 +6,9 @@
 //! values, can run only at translation: the runtime owns no String storage.
 //! Each row of this closed catalog names its exact entry point, its ordered
 //! external argument interface, and one evaluator that reproduces the MSL 4.1
-//! C source over the values of its input arguments. A file name that is an
+//! C source over the values of its input arguments. A String comparison is
+//! cataloged for the same reason: it reads no file, but only text it compares.
+//! A file name that is an
 //! MLS §13.5 URI names the resource the URI resolves to, as the tool's
 //! `ModelicaServices` resolves it; any other name has the C meaning.
 
@@ -27,6 +29,8 @@ pub enum TranslationRead {
     /// `ModelicaIO_readRealMatrix(fileName, matrixName, matrix, nrow, ncol,
     /// verboseRead)`.
     ReadRealMatrix,
+    /// `result = ModelicaStrings_compare(string1, string2, caseSensitive)`.
+    CompareStrings,
 }
 
 /// The Modelica type of one value crossing a reader's interface.
@@ -91,6 +95,7 @@ impl TranslationRead {
             Self::FullPathName,
             Self::ReadMatrixSizes,
             Self::ReadRealMatrix,
+            Self::CompareStrings,
         ]
         .into_iter()
         .find(|read| read.entry_point() == entry_point)
@@ -102,7 +107,14 @@ impl TranslationRead {
             Self::FullPathName => "ModelicaInternal_fullPathName",
             Self::ReadMatrixSizes => "ModelicaIO_readMatrixSizes",
             Self::ReadRealMatrix => "ModelicaIO_readRealMatrix",
+            Self::CompareStrings => "ModelicaStrings_compare",
         }
+    }
+
+    /// Whether the row reads files, which only a translation that resolves
+    /// resource roots may do.
+    pub const fn reads_files(self) -> bool {
+        !matches!(self, Self::CompareStrings)
     }
 
     /// The ordered external argument interface.
@@ -119,6 +131,7 @@ impl TranslationRead {
                 Input(Integer),
                 Input(Boolean),
             ],
+            Self::CompareStrings => &[STRING, STRING, Input(Boolean)],
         }
     }
 
@@ -126,6 +139,7 @@ impl TranslationRead {
     pub const fn returns(self) -> Option<ReadElement> {
         match self {
             Self::FullPathName => Some(ReadElement::String),
+            Self::CompareStrings => Some(ReadElement::Integer),
             Self::ReadMatrixSizes | Self::ReadRealMatrix => None,
         }
     }
@@ -177,6 +191,25 @@ impl TranslationRead {
                     )));
                 }
                 Ok(vec![row_major(&matrix)])
+            }
+            (
+                Self::CompareStrings,
+                [
+                    Value::String(left),
+                    Value::String(right),
+                    Value::Bool(case_sensitive),
+                ],
+            ) => {
+                // strcmp over bytes; otherwise C `tolower`, which is ASCII.
+                let ordering = if *case_sensitive {
+                    left.as_bytes().cmp(right.as_bytes())
+                } else {
+                    let lower = |text: &str| text.to_ascii_lowercase().into_bytes();
+                    lower(left).cmp(&lower(right))
+                };
+                // The ordinal of `Modelica.Utilities.Types.Compare`
+                // (Less, Equal, Greater), as the C function returns it.
+                Ok(vec![Value::Integer(ordering as i64 + 2)])
             }
             _ => Err(mismatch()),
         }
