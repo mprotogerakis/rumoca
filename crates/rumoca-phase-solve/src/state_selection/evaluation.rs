@@ -139,8 +139,9 @@ impl TrialPoint {
         stage: &FormalStageProgram<'_, '_, '_>,
         columns: &[(FormalStageCoordinate<'_, '_>, usize)],
     ) -> Result<DenseStageMatrix, StructuralError> {
+        let mut point = self.evaluate(programs, stage, columns)?;
         for _ in 0..12 {
-            let (residual, matrix, scales) = self.evaluate(programs, stage, columns)?;
+            let (residual, matrix, scales) = point;
             // A constraint balancing large terms cannot reach an absolute bound
             // below its own rounding: it is settled once its residual is within
             // the rounding of the linearized term magnitudes |J_ij| |x_j|.
@@ -154,16 +155,47 @@ impl TrialPoint {
             let step = matrix
                 .correction(&residual)
                 .map_err(|e| failure(format!("trial correction: {e:?}")))?;
-            for ((coordinate, scalar), delta) in columns.iter().zip(step) {
-                self.values[coordinate.value().index() as usize]
-                    .as_mut()
-                    .ok_or_else(|| failure("trial column has no numeric value"))?[*scalar] += delta;
-            }
+            point = self.step_within_domain(programs, stage, columns, &step)?;
         }
         Err(failure(format!(
             "stage {} trial constraints did not converge",
             stage.stage().level()
         )))
+    }
+
+    /// Take the Newton `step`, halved while the stage cannot be evaluated at
+    /// its end (a function's domain assertion, a non-finite value): the
+    /// constraints hold inside that domain, which a full step from a start
+    /// value can overshoot (a medium's enthalpy below its range).
+    fn step_within_domain(
+        &mut self,
+        programs: &FormalDerivativePrograms<'_, '_, '_>,
+        stage: &FormalStageProgram<'_, '_, '_>,
+        columns: &[(FormalStageCoordinate<'_, '_>, usize)],
+        step: &[f64],
+    ) -> Result<(Vec<f64>, DenseStageMatrix, Vec<f64>), StructuralError> {
+        let base = columns
+            .iter()
+            .map(|(coordinate, scalar)| {
+                self.values[coordinate.value().index() as usize]
+                    .as_ref()
+                    .map(|values| values[*scalar])
+                    .ok_or_else(|| failure("trial column has no numeric value"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut alpha = 1.0;
+        loop {
+            for (((coordinate, scalar), delta), base) in columns.iter().zip(step).zip(&base) {
+                self.values[coordinate.value().index() as usize]
+                    .as_mut()
+                    .expect("checked trial column")[*scalar] = base + alpha * delta;
+            }
+            match self.evaluate(programs, stage, columns) {
+                Ok(point) => return Ok(point),
+                Err(error) if alpha < 1e-3 => return Err(error),
+                Err(_) => alpha /= 2.0,
+            }
+        }
     }
 
     fn evaluate(
