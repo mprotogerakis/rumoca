@@ -41,15 +41,22 @@ pub(super) const fn uses_single_pass(values: usize) -> bool {
 
 /// `target` with only its register allocator switched to single-pass.
 fn single_pass_target(target: &dyn TargetIsa) -> Result<OwnedTargetIsa, String> {
+    derived_target(target, "regalloc_algorithm", "single_pass")
+}
+
+/// `target` with only its shared setting `name` set to `value`.
+fn derived_target(
+    target: &dyn TargetIsa,
+    name: &str,
+    value: &str,
+) -> Result<OwnedTargetIsa, String> {
     let mut shared = settings::builder();
     for value in target.flags().iter() {
         shared
             .set(value.name, &value.value_string())
             .map_err(|error| error.to_string())?;
     }
-    shared
-        .set("regalloc_algorithm", "single_pass")
-        .map_err(|error| error.to_string())?;
+    shared.set(name, value).map_err(|error| error.to_string())?;
     let mut isa = cranelift_codegen::isa::lookup(target.triple().clone())
         .map_err(|error| error.to_string())?;
     for value in target.isa_flags() {
@@ -105,6 +112,14 @@ fn compile_bytes(
     function: FuncId,
     context: &mut cranelift_codegen::Context,
 ) -> Result<CompiledFunction, String> {
+    let unoptimized;
+    let target = if has_long_block(&context.func) {
+        split_long_blocks(&mut context.func);
+        unoptimized = derived_target(target, "opt_level", "none")?;
+        &*unoptimized
+    } else {
+        target
+    };
     let alignment = context
         .compile(target, &mut Default::default())
         .map_err(|error| format!("{:?}", error.inner))?
@@ -124,6 +139,50 @@ fn compile_bytes(
         bytes,
         relocations,
     })
+}
+
+/// A block longer than this many IR instructions is cut into pieces of
+/// [`BLOCK_SPLIT_INSTS`].
+///
+/// Cranelift's `MachBuffer` emits branch veneers, constants and trap stubs in
+/// islands, and only between blocks. A straight-line block longer than an
+/// AArch64 conditional branch reaches (±32 KiB for `tbz`, ±1 MiB for `b.cond`)
+/// passes those deadlines: a debug build trips `LabelUse::patch`'s range
+/// assertion, a release build patches a truncated offset. Unrolled function
+/// bodies reach that length (MSL R134a's Helmholtz iterations: blocks of
+/// 20000 instructions); every other function keeps its blocks.
+const LONG_BLOCK_INSTS: usize = 8_192;
+const BLOCK_SPLIT_INSTS: usize = 1_024;
+
+fn has_long_block(func: &cranelift_codegen::ir::Function) -> bool {
+    func.dfg.num_insts() > LONG_BLOCK_INSTS
+        && func.layout.blocks().any(|block| {
+            func.layout
+                .block_insts(block)
+                .nth(LONG_BLOCK_INSTS)
+                .is_some()
+        })
+}
+
+/// Cut every block longer than [`BLOCK_SPLIT_INSTS`] into a chain joined by
+/// jumps. Each continuation's only predecessor is the part before it, so every
+/// value stays dominated and the computed values are unchanged. Such a
+/// function compiles without the egraph pass: it elaborates every pure value
+/// where it is used and so gathers the pieces back into one block.
+fn split_long_blocks(func: &mut cranelift_codegen::ir::Function) {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    use cranelift_codegen::ir::InstBuilder;
+    let blocks = func.layout.blocks().collect::<Vec<_>>();
+    for block in blocks {
+        let insts = func.layout.block_insts(block).collect::<Vec<_>>();
+        let mut part = block;
+        for &before in insts.iter().step_by(BLOCK_SPLIT_INSTS).skip(1) {
+            let next = func.dfg.make_block();
+            func.layout.split_block(next, before);
+            FuncCursor::new(func).at_bottom(part).ins().jump(next, &[]);
+            part = next;
+        }
+    }
 }
 
 fn define_compiled<M: Module>(module: &mut M, compiled: &CompiledFunction) -> Result<(), String> {
