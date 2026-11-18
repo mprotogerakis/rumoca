@@ -502,6 +502,16 @@ pub(super) fn analyze_initial_algorithms(
             }
         }
     }
+    let mut fold = TextFold { flat, constants };
+    for value in analysis.parameters.values_mut() {
+        *value = fold.rewrite_expression(value);
+    }
+    for value in analysis.discrete_values.values_mut() {
+        value.value = fold.rewrite_expression(&value.value);
+    }
+    for assertion in &mut analysis.assertions {
+        assertion.condition = fold.rewrite_expression(&assertion.condition);
+    }
     for assertion in &analysis.assertions {
         validate_expression(&assertion.condition, roles, states)?;
         validate_expression(&assertion.message, roles, states)?;
@@ -511,6 +521,62 @@ pub(super) fn analyze_initial_algorithms(
     }
     reject_competing_initial_equations(flat, roles, &analysis.parameters)?;
     Ok(analysis)
+}
+
+/// Folds what an initial section computes from text to its translation value.
+///
+/// The runtime owns no String storage, so a String parameter keeps its declared
+/// value: a subexpression that reads only constants and String parameters is
+/// settled at translation, and one that reads text (the `Strings.isEqual`
+/// substance lookup of `Modelica.Fluid.Sensors.TraceSubstances`) can only be
+/// evaluated then. Every other subexpression keeps its meaning.
+struct TextFold<'a> {
+    flat: &'a flat::Model,
+    constants: &'a EvalContext,
+}
+
+impl TextFold<'_> {
+    fn settled(&self, expression: &Expression) -> Option<Expression> {
+        if matches!(expression, Expression::Literal { .. }) {
+            return None;
+        }
+        let mut reads = ValueReads::default();
+        rumoca_core::ExpressionVisitor::visit_expression(&mut reads, expression);
+        let mut text = false;
+        for read in &reads.names {
+            let Some(variable) = self.flat.variables.get(read) else {
+                continue;
+            };
+            let is_text = effective_variable_scalar_type(self.flat, variable)
+                == Some(dae::ScalarType::String);
+            match variable.variability {
+                Variability::Constant(_) => {}
+                Variability::Parameter(_) if is_text => {}
+                _ => return None,
+            }
+            text |= is_text;
+        }
+        if !text {
+            return None;
+        }
+        let value = match eval_expr(expression, self.constants).ok()? {
+            EvalValue::Integer(number) => Literal::Integer(number),
+            EvalValue::Bool(flag) => Literal::Boolean(flag),
+            EvalValue::Real(number) => Literal::Real(number),
+            _ => return None,
+        };
+        Some(Expression::Literal {
+            value,
+            span: expression.span()?,
+        })
+    }
+}
+
+impl ExpressionRewriter for TextFold<'_> {
+    fn rewrite_expression(&mut self, expression: &Expression) -> Expression {
+        self.settled(expression)
+            .unwrap_or_else(|| self.walk_expression(expression))
+    }
 }
 
 /// Reject a deferred parameter that an initial equation also determines.
