@@ -33,12 +33,13 @@ use nalgebra::DMatrix;
 use rumoca_ir_solve as solve;
 
 use super::scaling::{
-    ScaledNewtonSystem, jacobian_row_scales, model_variable_scale, scaled_correction_converged,
-    scaled_newton_delta, scaled_residual_converged, scaled_residual_norm,
+    ScaledNewtonSystem, jacobian_row_scales, model_variable_scale, residual_at_rounding,
+    scaled_correction_converged, scaled_newton_delta, scaled_residual_converged,
+    scaled_residual_norm,
 };
 use super::{
     ImplicitProjectionModel, KernelAnswer, KernelRequest, ProjectionBlockUpdate, RuntimeSolveError,
-    TornBlock, implicit_selected_jacobian_v_rows,
+    TornBlock, algebraic_block_jacobian, implicit_selected_jacobian_v_rows,
 };
 
 use rumoca_eval_solve::projection_policy::{
@@ -244,7 +245,8 @@ fn advance_torn_newton<M: ImplicitProjectionModel>(
                     delta.as_slice(),
                     tol,
                 )
-                && causal_correction_converged(model, y, (p, t), tearing, &step)?))
+                && causal_correction_converged(model, y, (p, t), tearing, &step)?)
+            || residual_rows_at_rounding(model, (&*y, p, t), tearing, residual)?)
     {
         return Ok(TornStep::Settled);
     }
@@ -512,6 +514,35 @@ fn recovered_correction_converged<M: ImplicitProjectionModel>(
             let scale = model_variable_scale(model, causal.y_index, base.causal(row));
             scaled_correction_converged(&[correction], &[scale], tol)
         })
+}
+
+/// Whether every reduced residual row is at the rounding of the largest term
+/// it balances over the block's own unknowns. A correction computed from it is
+/// rounding noise, which no further step resolves: a coordinate fixed by the
+/// cancellation of large terms (a small enthalpy balance of two large port
+/// flows) is as converged as its arithmetic allows. A tear whose recovery
+/// lost accuracy leaves a reduced row far above its terms' rounding, so it
+/// still declines to the dense solve.
+fn residual_rows_at_rounding<M: ImplicitProjectionModel>(
+    model: &M,
+    (y, p, t): (&[f64], &[f64], f64),
+    tearing: &solve::BlockTearing,
+    residual: &[f64],
+) -> Result<bool, RuntimeSolveError> {
+    let unknowns: Vec<usize> = tearing
+        .tear_y_indices
+        .iter()
+        .copied()
+        .chain(tearing.causal_steps.iter().map(|step| step.y_index))
+        .collect();
+    let jacobian = algebraic_block_jacobian(model, y, p, t, &tearing.residual_rows, &unknowns, None)?;
+    let scales: Vec<f64> = unknowns
+        .iter()
+        .map(|&index| model_variable_scale(model, index, y[index]))
+        .collect();
+    let fallback = vec![1.0; residual.len()];
+    let row_scales = jacobian_row_scales(&jacobian, &scales, &fallback, None);
+    Ok(residual_at_rounding(residual, &row_scales))
 }
 
 /// Whether the undamped step moves every causal target within tolerance. The
