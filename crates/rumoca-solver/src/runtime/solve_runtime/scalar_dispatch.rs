@@ -550,6 +550,23 @@ impl SolveRuntime {
         )
     }
 
+    pub fn eval_linearization_tangent_into(
+        &self,
+        lin: AlgebraicLinearization<'_>,
+        solver_y: &[f64],
+        seed: &[f64],
+        solver_y_out: &mut [f64],
+        der_out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        self.scalar_execution()?.eval_linearization_tangent_into(
+            lin,
+            solver_y,
+            seed,
+            solver_y_out,
+            der_out,
+        )
+    }
+
     pub fn reverse_state_derivative_vjp(
         &self,
         lin: AlgebraicLinearization<'_>,

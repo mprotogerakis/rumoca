@@ -44,9 +44,21 @@ impl CausalSeedSchedules {
         model: &solve::SolveModel,
         backend: Option<&Rc<dyn SolveExecutionBackend>>,
     ) -> Result<Self, EvalSolveError> {
+        Self::construct_for(
+            model,
+            backend,
+            model.problem.continuous.refresh_owners.derivative(),
+        )
+    }
+
+    /// The schedules that differentiate `plan`'s issued assignment segments.
+    pub(super) fn construct_for(
+        model: &solve::SolveModel,
+        backend: Option<&Rc<dyn SolveExecutionBackend>>,
+        plan: &solve::RefreshPlan,
+    ) -> Result<Self, EvalSolveError> {
         let continuous = &model.problem.continuous;
         let owners = &continuous.refresh_owners;
-        let plan = owners.derivative();
         let blocks = model.artifacts.continuous.structural.algebraic_projection();
         // The existing source-bound certificate covers primal and full Y+P
         // directional operations, including discarded effects and nested regions.

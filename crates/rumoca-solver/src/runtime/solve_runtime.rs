@@ -418,6 +418,10 @@ struct ScalarExecutionInventory {
     compiled_event_action_rows: RefCell<FxHashMap<usize, Vec<CompiledDiscreteSpecialization>>>,
     failed_event_action_rows: RefCell<BTreeSet<usize>>,
     causal_seed_schedules: causal_seed_schedules::CausalSeedSchedules,
+    /// The same for the complete algebraic refresh, which only a
+    /// linearization's output tangents need, so it is prepared on first use.
+    algebraic_causal_seed_schedules:
+        std::cell::OnceCell<causal_seed_schedules::CausalSeedSchedules>,
     compiled_assignment_schedules: interpreted_schedules::CompiledSchedules,
     /// The target indices of each executed assignment schedule's refresh
     /// rows, in row order, collected on its first refresh. A sequence id names
