@@ -300,8 +300,3 @@ opt-level = 2
 opt-level = 3
 [profile.dev.package.scnr2]
 opt-level = 3
-
-[patch.crates-io]
-# Keep the numerical corrections in the maintained 0.13.2 fork.
-# Provenance: docs/dev-guide/src/runtime/diffsol-maintenance.md.
-diffsol = { git = "https://github.com/CogniPilot/diffsol", rev = "4a8aebb83e088cc454d1716c81768eb36386292f" }
