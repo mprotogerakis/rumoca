@@ -281,6 +281,91 @@ impl ScalarExecutionView<'_> {
         Ok(())
     }
 
+    /// One tangent of a state-space linearization at a `solver_y` the caller
+    /// settled with [`Self::full_solver_y`]. `seed` spans `[solver-y |
+    /// parameter]`; its state and parameter (input) entries are the direction,
+    /// its algebraic entries are ignored. `solver_y_out` receives the tangent
+    /// of every solver-y variable (states unchanged, each algebraic through the
+    /// full algebraic projection, the `C`/`D` rows) and `der_out` the tangent of
+    /// `der(state)` (the `A`/`B` columns), both exact forward-mode AD from one
+    /// seed propagation, so a linearization settles the point once, not per
+    /// column.
+    pub fn eval_linearization_tangent_into(
+        &self,
+        lin: AlgebraicLinearization<'_>,
+        solver_y: &[f64],
+        seed: &[f64],
+        solver_y_out: &mut [f64],
+        der_out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        let AlgebraicLinearization { t, params, .. } = lin;
+        self.validate_refresh_inputs(solver_y, params)?;
+        validate_derivative_output_len(der_out, self.state_count)?;
+        let mut scratch = self.scalar.derivative_scratch.borrow_mut();
+        let StateDerivativeScratch { seed_buf, .. } = &mut *scratch;
+        let seed_len = self
+            .scalar
+            .derivative_jacobian_v
+            .source()
+            .requirements()
+            .seed_len
+            .max(
+                self.scalar
+                    .implicit_jacobian_v
+                    .source()
+                    .requirements()
+                    .seed_len,
+            )
+            .max(self.solver_count + self.model.problem.layout.p_scalars());
+        seed_buf.clear();
+        seed_buf.resize(seed_len, 0.0);
+        let n = seed.len().min(seed_len);
+        seed_buf[..n].copy_from_slice(&seed[..n]);
+        seed_buf[self.state_count..self.solver_count].fill(0.0);
+        // The complete algebraic plan, through its differentiated assignment
+        // schedules when construction certified them (as the derivative plan's
+        // seed refresh does), else block by block.
+        let plan = &self.scalar.algebraic_refresh;
+        let schedules = self.scalar.algebraic_causal_seed_schedules.get_or_init(|| {
+            causal_seed_schedules::CausalSeedSchedules::construct_for(
+                &self.model,
+                self.scalar.execution_backend.as_ref(),
+                self.model.problem.continuous.refresh_owners.algebraic(),
+            )
+            .unwrap_or_default()
+        });
+        let context = self.row_eval_context();
+        if !schedules.apply(plan, lin, solver_y, seed_buf, context)?
+            && !schedules.apply_mixed(
+                lin,
+                solver_y,
+                seed_buf,
+                context,
+                |projection, block, seed| {
+                    self.seed_refresh_blocks((projection, &[block]), lin, solver_y, seed)
+                },
+            )?
+        {
+            self.seed_refresh_with_plan(plan, lin, solver_y, seed_buf)?;
+        }
+        let copy = self.solver_count.min(solver_y_out.len());
+        solver_y_out[..copy].copy_from_slice(&seed_buf[..copy]);
+        let context = RowEvalContext {
+            seed: Some(seed_buf.as_slice()),
+            ..self.row_eval_context()
+        };
+        self.scalar.derivative_jacobian_v.eval(
+            solve_eval::JacobianEvalInputs {
+                y: solver_y,
+                p: params,
+                t,
+                seed: seed_buf,
+            },
+            context,
+            der_out,
+        )
+    }
+
     /// Index of a solver-y variable (state or algebraic) by qualified name, or
     /// `None` if it is not a solver variable (e.g. a parameter or unknown name).
     pub fn solver_variable_index(&self, name: &str) -> Option<usize> {
