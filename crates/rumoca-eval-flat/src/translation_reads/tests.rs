@@ -65,6 +65,7 @@ fn catalog_rows_are_identified_by_language_and_entry_point() {
         TranslationRead::FullPathName,
         TranslationRead::ReadMatrixSizes,
         TranslationRead::ReadRealMatrix,
+        TranslationRead::CompareStrings,
     ] {
         assert_eq!(
             TranslationRead::from_external("C", read.entry_point()),
@@ -177,6 +178,25 @@ fn mat_readers_return_sizes_and_row_major_values() {
         .evaluate(&[file, string("s.Matrix_A")], &roots)
         .expect_err("a struct field path is refused");
     assert!(field.to_string().contains("struct field path"));
+}
+
+#[test]
+fn string_compare_returns_the_compare_ordinal() {
+    let roots = ResourceRoots::new();
+    let compare = |left: &str, right: &str, case_sensitive: bool| {
+        TranslationRead::CompareStrings
+            .evaluate(
+                &[string(left), string(right), Value::Bool(case_sensitive)],
+                &roots,
+            )
+            .unwrap()
+    };
+    assert_eq!(compare("CO2", "CO2", true), vec![Value::Integer(2)]);
+    assert_eq!(compare("CO2", "H2O", true), vec![Value::Integer(1)]);
+    assert_eq!(compare("b", "a", true), vec![Value::Integer(3)]);
+    assert_eq!(compare("co2", "CO2", true), vec![Value::Integer(3)]);
+    assert_eq!(compare("co2", "CO2", false), vec![Value::Integer(2)]);
+    assert!(!TranslationRead::CompareStrings.reads_files());
 }
 
 #[test]
