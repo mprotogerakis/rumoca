@@ -487,3 +487,88 @@ fn state_coordinates_are_set_and_reported_by_the_variables_they_stand_for() {
         assert!(error.to_string().contains(valid), "{error}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Where Newton stalls: a state on its rate limit, or below a spill, has a
+// constant derivative and a zero column in A, so no Newton or
+// Levenberg–Marquardt step has a gradient to follow, and pseudo-transient
+// continuation follows the system's own trajectory instead.
+// ---------------------------------------------------------------------------
+
+fn trimmed(source: &str, model: &str) -> rumoca_sim::TrimResult {
+    let result = compile(source, model);
+    trim_dae(&result.dae, &SimOptions::default(), &TrimRequest::default())
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn trimmed_state(trim: &rumoca_sim::TrimResult, name: &str) -> f64 {
+    trim.states
+        .iter()
+        .find(|(state, _)| state == name)
+        .unwrap_or_else(|| panic!("no state {name} in {:?}", trim.states))
+        .1
+}
+
+/// A positioner at its rate limit `r` far from its set point `u`:
+/// der(y) = clamp((u - y)/T, -r, r), steady at y = u.
+#[test]
+fn a_rate_limited_state_far_from_its_target_trims_to_it() {
+    let trim = trimmed(
+        r#"
+model RateLimited
+  parameter Real r = 2;
+  parameter Real T = 0.1;
+  input Real u = 50;
+  Real y(start = 0, fixed = true);
+equation
+  der(y) = max(-r, min(r, (u - y) / T));
+end RateLimited;
+"#,
+        "RateLimited",
+    );
+    assert_close(trimmed_state(&trim, "y"), 50.0, 1.0e-9, "y");
+    assert!(trim.residual <= 1.0e-10, "{trim:?}");
+}
+
+/// A tank filled at `qin` that drains only over its spill at `hs`:
+/// area der(h) = qin - ks max(0, h - hs), steady at h = hs + qin/ks.
+#[test]
+fn a_tank_filling_towards_its_spill_trims_to_the_spill_level() {
+    let trim = trimmed(
+        r#"
+model Spill
+  parameter Real area = 2;
+  parameter Real qin = 0.3;
+  parameter Real hs = 1.5;
+  parameter Real ks = 0.4;
+  Real h(start = 0.2, fixed = true);
+  Real qs;
+equation
+  qs = ks * max(0, h - hs);
+  area * der(h) = qin - qs;
+end Spill;
+"#,
+        "Spill",
+    );
+    assert_close(trimmed_state(&trim, "h"), 1.5 + 0.3 / 0.4, 1.0e-9, "h");
+    assert!(trim.residual <= 1.0e-10, "{trim:?}");
+}
+
+/// The only equilibrium, x = 0, repels: der(x) = clamp(x, -1, 1) from x = 5
+/// runs away on its limit. The search ends in its budget and reports the
+/// residual there, not a point.
+#[test]
+fn an_unstable_equilibrium_is_reported_as_a_failure_to_trim() {
+    let trim = trimmed(
+        r#"
+model Repeller
+  Real x(start = 5, fixed = true);
+equation
+  der(x) = max(-1, min(1, x));
+end Repeller;
+"#,
+        "Repeller",
+    );
+    assert_close(trim.residual, 1.0, 1.0e-12, "residual");
+    assert!(trimmed_state(&trim, "x").is_finite(), "{trim:?}");
+}
