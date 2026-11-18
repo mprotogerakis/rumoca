@@ -12,7 +12,10 @@
 use rumoca_core::linear_solve::{AugmentedMatrix, gaussian_eliminate};
 use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
-use rumoca_solver::{AlgebraicLinearization, AlgebraicSettle, SimOptions, SolveRuntime};
+use rumoca_solver::{
+    AlgebraicLinearization, AlgebraicSettle, EventUpdateRowFilter, ProjectedEventUpdateInput,
+    SimOptions, SolveRuntime,
+};
 
 use super::diagnostics::SimulationDiagnosticError;
 use super::overrides::{
@@ -78,7 +81,9 @@ pub struct Linearization {
     pub d: Vec<Vec<f64>>,
 }
 
-/// Lower `model` and linearize it at the request's operating point.
+/// Lower `model` and linearize it at the request's operating point, its
+/// discrete values those a run starts with, switched as an event at the point
+/// would switch them.
 pub fn linearize_dae(
     model: &dae::Dae,
     opts: &SimOptions,
@@ -157,22 +162,40 @@ pub struct TrimResult {
 
 const TRIM_MAX_ITERS: usize = 100;
 const TRIM_TOL: f64 = 1.0e-10;
+/// Pseudo-time steps, rejected ones included, before the search gives up.
+const PTC_MAX_STEPS: usize = 500;
+/// A pseudo-time step past which `I/Δt` is lost to rounding against any `A`.
+const PTC_MAX_DT: f64 = 1.0e30;
+/// The largest move of a pseudo-time step, as a fraction of each state's scale.
+const TRUST: f64 = 0.2;
+/// Discrete mode switches at a steady state before the search keeps the last.
+const MODE_SWITCHES: usize = 3;
 
 /// Lower `model` and solve `der(x)(x, u) = 0` for the free states.
 ///
-/// Each step is a Newton step on the exact `A` restricted to the free columns.
-/// When that matrix is singular or rectangular (an integrator whose flows
-/// balance, or held states), or the step does not reduce `|der(x)|`, it is a
-/// Levenberg–Marquardt step `(JᵀJ + μI) δ = -Jᵀ der` with `μ` raised until
-/// the residual falls. The search stops at `max |der| <= 1e-10`, at a step
-/// below rounding, or when no damping reduces the residual; `residual` reports
-/// where it stood.
+/// First Newton on the exact `A` restricted to the free columns, with
+/// Levenberg–Marquardt steps `(JᵀJ + μI) δ = -Jᵀ der` where that matrix is
+/// singular or rectangular (an integrator whose flows balance, held states)
+/// or the step does not reduce `|der(x)|`. Where that stalls (a rate-limited
+/// or saturated state has a constant derivative and a zero column in `A`, so
+/// no step has a gradient to follow), pseudo-transient continuation from the
+/// start guess follows the system's own trajectory towards its steady state
+/// ([`pseudo_transient`]), and Newton finishes from where it ends.
+///
+/// Discrete values start as a run's initialization leaves them; each point
+/// reads the relations its equations read off itself; the pseudo-time
+/// trajectory switches discrete modes as an event at each step would; and a
+/// steady state an event there would switch is searched again in its new
+/// mode. The search stops at `max |der| <= 1e-10` or its step budget;
+/// `residual` reports where it stood, so a system with no steady state
+/// reachable from the guess (an unstable equilibrium) reports a residual, not
+/// a point.
 pub fn trim_dae(
     model: &dae::Dae,
     opts: &SimOptions,
     request: &TrimRequest,
 ) -> Result<TrimResult, SimulationDiagnosticError> {
-    let point = OperatingPoint::lower(
+    let mut point = OperatingPoint::lower(
         model,
         opts,
         request.t,
@@ -188,33 +211,18 @@ pub fn trim_dae(
             .ok_or_else(|| not_a_state(name, &point.names))?;
         free.retain(|&index| index != fixed);
     }
-    let mut x = point.state.clone();
-    let mut f = point.derivatives(&x)?;
     let mut iterations = 0;
-    let mut mu = 0.0_f64;
-    while iterations < TRIM_MAX_ITERS && max_abs(&f) > TRIM_TOL && !free.is_empty() {
-        let solver_y = point.settle_at(&x)?;
-        let mut jacobian = vec![Vec::with_capacity(free.len()); f.len()];
-        for &state in &free {
-            let (column, _) = point.tangent(&solver_y, state)?;
-            for (row, value) in jacobian.iter_mut().zip(column) {
-                row.push(value);
-            }
-        }
-        let Some((trial, trial_f)) = damped_descent(&point, (&jacobian, &free), (&x, &f), &mut mu)
-        else {
-            break;
-        };
-        let moved = trial
-            .iter()
-            .zip(&x)
-            .any(|(new, old)| (new - old).abs() > 1.0e-14 * (1.0 + old.abs()));
-        x = trial;
-        f = trial_f;
-        iterations += 1;
-        if !moved {
+    let start = point.state.clone();
+    let (mut x, mut f) = steady_state(&mut point, &free, start, &mut iterations)?;
+    // A steady state whose discrete variables an event there would switch is
+    // the steady state of a mode it is not in: that mode's, then.
+    for _ in 0..MODE_SWITCHES {
+        let params = point.event_at(&x);
+        if max_abs(&f) > TRIM_TOL || params == point.params {
             break;
         }
+        point.params = params;
+        (x, f) = steady_state(&mut point, &free, x, &mut iterations)?;
     }
     Ok(TrimResult {
         residual: max_abs(&f),
@@ -222,6 +230,215 @@ pub fn trim_dae(
         states_set: point.states_set,
         iterations,
     })
+}
+
+/// Newton from `start`; where it stalls, pseudo-transient continuation from
+/// `start`, finished by Newton. `(x, der(x))` where the better one ended, the
+/// point's discrete values those of its mode.
+fn steady_state(
+    point: &mut OperatingPoint,
+    free: &[usize],
+    start: Vec<f64>,
+    iterations: &mut usize,
+) -> Result<(Vec<f64>, Vec<f64>), SimulationDiagnosticError> {
+    let mut x = start.clone();
+    let f = newton(point, free, &mut x, iterations)?;
+    if free.iter().all(|&state| f[state].abs() <= TRIM_TOL) {
+        return Ok((x, f));
+    }
+    let mode = point.params.clone();
+    let mut y = start;
+    pseudo_transient(point, free, &mut y, iterations)?;
+    let g = newton(point, free, &mut y, iterations)?;
+    if max_abs(&g) < max_abs(&f) {
+        return Ok((y, g));
+    }
+    point.params = mode;
+    Ok((x, f))
+}
+
+/// Newton/Levenberg–Marquardt from `x` over the `free` states: `der(x)` where
+/// it stops, `x` moved there, `iterations` counting its steps.
+fn newton(
+    point: &OperatingPoint,
+    free: &[usize],
+    x: &mut Vec<f64>,
+    iterations: &mut usize,
+) -> Result<Vec<f64>, SimulationDiagnosticError> {
+    let mut f = point.derivatives(x)?;
+    let mut mu = 0.0_f64;
+    for _ in 0..TRIM_MAX_ITERS {
+        if max_abs(&f) <= TRIM_TOL || free.is_empty() {
+            break;
+        }
+        let jacobian = point.columns(x, free)?;
+        let Some((trial, trial_f)) = damped_descent(point, (&jacobian, free), (x, &f), &mut mu)
+        else {
+            break;
+        };
+        let moved = trial
+            .iter()
+            .zip(x.iter())
+            .any(|(new, old)| (new - old).abs() > 1.0e-14 * (1.0 + old.abs()));
+        *x = trial;
+        f = trial_f;
+        *iterations += 1;
+        if !moved {
+            break;
+        }
+    }
+    Ok(f)
+}
+
+/// Pseudo-transient continuation (C. T. Kelley and D. E. Keyes, "Convergence
+/// analysis of pseudo-transient continuation", SIAM J. Numer. Anal. 35(2),
+/// 1998): `x ← x + (I/Δt − A)⁻¹ der(x)` over the free states, a linearly
+/// implicit Euler step of the system's own dynamics, which follows its
+/// trajectory while `Δt` is small and becomes Newton's step as `Δt` grows.
+///
+/// - `Δt` starts at [`initial_step`] and grows by switched evolution
+///   relaxation (W. A. Mulder and B. van Leer, J. Comput. Phys. 59, 1985),
+///   `Δt ← Δt·‖der_prev‖/‖der‖` within ×10 a step, and at least doubles while
+///   `‖der‖` does not double: a state on its rate limit moves at a constant
+///   speed, which plain SER would never reward.
+/// - A step moves no state by more than a fifth of its scale (a trust region:
+///   the Newton step of a large `Δt` does not leap past the nonlinearity it
+///   linearized), and is shortened, without growing `Δt`, to fit.
+/// - A step across a state's target is bisected: where a derivative changes
+///   sign without shrinking by half (a saturated or switched derivative jumps
+///   there), until it does not, which lands the state in its linear zone; a
+///   step whose derivative is not finite is bisected too, and `Δt` halves
+///   where no length of it is admissible.
+/// - Each trial is evaluated in the discrete mode an event there leaves
+///   ([`OperatingPoint::event_at`]), so the trajectory passes a tank's spill
+///   port as a run would.
+fn pseudo_transient(
+    point: &mut OperatingPoint,
+    free: &[usize],
+    x: &mut Vec<f64>,
+    iterations: &mut usize,
+) -> Result<(), SimulationDiagnosticError> {
+    let rows = |f: &[f64]| -> Vec<f64> { free.iter().map(|&state| f[state]).collect() };
+    let mut f = rows(&point.derivatives(x)?);
+    let mut dt = 0.0_f64;
+    for _ in 0..PTC_MAX_STEPS {
+        if max_abs(&f) <= TRIM_TOL {
+            break;
+        }
+        let columns = point.columns(x, free)?;
+        let a: Vec<Vec<f64>> = free.iter().map(|&state| columns[state].clone()).collect();
+        if dt == 0.0 {
+            dt = initial_step(&a, (x, free), &f);
+        }
+        let implicit: Vec<Vec<f64>> = a
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(|(j, v)| f64::from(u8::from(i == j)) / dt - v)
+                    .collect()
+            })
+            .collect();
+        let Some(Trial {
+            length,
+            x: trial,
+            f: trial_f,
+            mode,
+        }) = solve_dense(&implicit, &f)
+            .and_then(|step| admissible_step(point, (x, free), &f, &step))
+        else {
+            dt /= 2.0;
+            continue;
+        };
+        let relaxation = norm2(&f) / norm2(&trial_f);
+        if length == 1.0 {
+            let growth = if relaxation >= 0.5 {
+                relaxation.clamp(2.0, 10.0)
+            } else {
+                relaxation
+            };
+            dt = (dt * growth).min(PTC_MAX_DT);
+        }
+        *x = trial;
+        f = trial_f;
+        point.params = mode;
+        *iterations += 1;
+    }
+    Ok(())
+}
+
+/// An admissible pseudo-time step: `x + length·step`, `der` there over the
+/// free rows, and the discrete values of its mode.
+struct Trial {
+    length: f64,
+    x: Vec<f64>,
+    f: Vec<f64>,
+    mode: Vec<f64>,
+}
+
+/// The longest of `step`, `step/2`, `step/4`, … from `x` (at most 30
+/// halvings, within the trust region) whose derivative is finite and sends no
+/// state across its target, each trial in the discrete mode an event there
+/// leaves.
+fn admissible_step(
+    point: &OperatingPoint,
+    (x, free): (&[f64], &[usize]),
+    f: &[f64],
+    step: &[f64],
+) -> Option<Trial> {
+    // A trust region: no state moves by more than a fifth of its own scale
+    // in one step, so a Newton step of a large `Δt` cannot leap past the
+    // nonlinearity it linearized.
+    let reach = free
+        .iter()
+        .zip(step)
+        .map(|(&state, delta)| {
+            delta.abs() / (TRUST * x[state].abs().max(point.model.solver_variable_scale(state)))
+        })
+        .fold(1.0, f64::max);
+    let mut length = 1.0 / reach;
+    for _ in 0..30 {
+        let scaled: Vec<f64> = step.iter().map(|delta| delta * length).collect();
+        let trial = moved(x, free, &scaled);
+        let mode = point.event_at(&trial);
+        if let Ok(trial_f) = point.derivatives_in(&trial, &mode) {
+            let trial_f: Vec<f64> = free.iter().map(|&state| trial_f[state]).collect();
+            let bounced = f
+                .iter()
+                .zip(&trial_f)
+                .any(|(old, new)| old * new < 0.0 && new.abs() >= 0.5 * old.abs());
+            if !bounced {
+                return Some(Trial {
+                    length,
+                    x: trial,
+                    f: trial_f,
+                    mode,
+                });
+            }
+        }
+        length /= 2.0;
+    }
+    None
+}
+
+/// The first pseudo-time step: no longer than the fastest mode's time
+/// constant, `1/‖A‖∞` (the row-sum norm bounds the spectral radius), so the
+/// first step resolves every mode the linearization sees; and no longer than
+/// moves a state by a hundredth of its own scale (`max(|x|, 1)`), which bounds
+/// it where `A` is zero (every state on a rate limit or saturated).
+fn initial_step(a: &[Vec<f64>], (x, free): (&[f64], &[usize]), f: &[f64]) -> f64 {
+    let fastest = a
+        .iter()
+        .map(|row| row.iter().map(|value| value.abs()).sum::<f64>())
+        .fold(0.0, f64::max);
+    let motion = free
+        .iter()
+        .zip(f)
+        .filter(|(_, derivative)| **derivative != 0.0)
+        .map(|(&state, derivative)| x[state].abs().max(1.0) / derivative.abs())
+        .fold(f64::INFINITY, f64::min);
+    (1.0 / fastest).min(0.01 * motion)
 }
 
 /// The first trial from `x` that lowers `|der(x)|`: Newton's step while `mu`
@@ -279,6 +496,48 @@ fn moved(x: &[f64], free: &[usize], step: &[f64]) -> Vec<f64> {
     trial
 }
 
+/// The discrete values a run starts with, by name into the parameter slots
+/// that hold them: its initialization and initial event settle them (a pump's
+/// `Run`, copied from its input at that event), where the lowered model holds
+/// their `start`. A model whose run does not start keeps those.
+#[cfg(any(feature = "solver-diffsol", feature = "solver-rk45"))]
+fn initialized_discrete(
+    model: &dae::Dae,
+    opts: &SimOptions,
+    solve_model: &solve::SolveModel,
+    params: &mut [f64],
+) {
+    let layout = &solve_model.problem.solve_layout;
+    if layout.discrete_real_scalar_names.is_empty()
+        && layout.discrete_valued_scalar_names.is_empty()
+    {
+        return;
+    }
+    let Ok(session) = crate::SimulationSession::new(model, opts.clone()) else {
+        return;
+    };
+    for name in layout
+        .discrete_real_scalar_names
+        .iter()
+        .chain(&layout.discrete_valued_scalar_names)
+    {
+        if let Some(solve::ScalarSlot::P { index, .. }) = solve_model.problem.layout.binding(name)
+            && let Ok(Some(value)) = session.get(name)
+        {
+            params[index] = value;
+        }
+    }
+}
+
+#[cfg(not(any(feature = "solver-diffsol", feature = "solver-rk45")))]
+fn initialized_discrete(_: &dae::Dae, _: &SimOptions, _: &solve::SolveModel, _: &mut [f64]) {}
+
+/// A state settled for evaluation.
+struct Settled {
+    params: Vec<f64>,
+    solver_y: Vec<f64>,
+}
+
 /// A lowered model, its runtime and a named operating state.
 struct OperatingPoint {
     model: solve::SolveModel,
@@ -288,6 +547,8 @@ struct OperatingPoint {
     names: Vec<String>,
     /// The states the request set.
     states_set: Vec<String>,
+    /// Its parameters with the discrete values of the point.
+    params: Vec<f64>,
     /// Where the parameter (and input) seeds start in `[solver-y | parameter]`.
     p_seed_offset: usize,
 }
@@ -345,7 +606,21 @@ impl OperatingPoint {
             .map(|(name, _)| name.clone())
             .collect();
         let runtime = SolveRuntime::new(&solve_model).map_err(SimulationDiagnosticError::from)?;
-        Ok(Self {
+        let mut params = solve_model.parameters.to_vec();
+        initialized_discrete(
+            model,
+            &SimOptions {
+                t_start: t,
+                t_end: t + 1.0,
+                // (the rk-like start settles a tank whose spill port is above
+                // its level, which the BDF start refuses as singular)
+                solver_mode: rumoca_solver::SimSolverMode::RkLike,
+                ..opts.clone()
+            },
+            &solve_model,
+            &mut params,
+        );
+        let mut point = Self {
             p_seed_offset: solve_model.problem.layout.y_scalars(),
             model: solve_model,
             runtime,
@@ -353,7 +628,10 @@ impl OperatingPoint {
             state,
             names,
             states_set,
-        })
+            params,
+        };
+        point.params = point.event_at(&point.state);
+        Ok(point)
     }
 
     fn linearize(
@@ -395,8 +673,8 @@ impl OperatingPoint {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let solver_y = self.settle_at(&self.state)?;
-        let params = &self.model.parameters;
+        let at = self.settle_at(&self.state)?;
+        let (solver_y, params) = (&at.solver_y, &at.params);
         let n = self.state.len();
         let mut a = vec![vec![0.0; n]; n];
         let mut b = vec![vec![0.0; inputs.len()]; n];
@@ -410,7 +688,7 @@ impl OperatingPoint {
         );
         for (col, input_slot) in seeds {
             let seed = input_slot.map_or(col, |slot| self.p_seed_offset + slot);
-            let (der, tangent) = self.tangent(&solver_y, seed)?;
+            let (der, tangent) = self.tangent(&at, seed)?;
             let (columns, rows) = match input_slot {
                 None => (&mut a, &mut c),
                 Some(_) => (&mut b, &mut d),
@@ -452,44 +730,143 @@ impl OperatingPoint {
         })
     }
 
-    fn lin(&self) -> AlgebraicLinearization<'_> {
-        AlgebraicLinearization {
-            t: self.t,
-            params: &self.model.parameters,
-            settle: SETTLE,
+    /// The parameters at `state`: the point's discrete values, with the
+    /// memory of the relations its equations read (a switched derivative)
+    /// read off `state`.
+    fn params_at(&self, state: &[f64]) -> Result<Vec<f64>, SimulationDiagnosticError> {
+        self.params_in(state, &self.params)
+    }
+
+    /// [`Self::params_at`] with the discrete values of `mode`.
+    fn params_in(
+        &self,
+        state: &[f64],
+        mode: &[f64],
+    ) -> Result<Vec<f64>, SimulationDiagnosticError> {
+        let mut params = mode.to_vec();
+        self.runtime.update_relation_memory_from_state(
+            self.t,
+            state,
+            &mut params,
+            SETTLE.tol,
+            SETTLE.max_iters,
+        )?;
+        Ok(params)
+    }
+
+    /// The discrete values an event at `state` leaves, `pre` being the
+    /// point's own (no edge fires): where its discrete variables follow the
+    /// state, they switch there (a tank's port the level passed). Where the
+    /// event iteration finds no consistent mode at `state` (a branch it
+    /// selects is singular there), the point keeps the ones it has, as a run
+    /// would until a relation crosses.
+    fn event_at(&self, state: &[f64]) -> Vec<f64> {
+        let Ok(pre_p) = self.params_at(state) else {
+            return self.params.clone();
+        };
+        let mut params = pre_p.clone();
+        let Ok(mut solver_y) =
+            self.runtime
+                .full_solver_y(self.t, state, &params, SETTLE.tol, SETTLE.max_iters)
+        else {
+            return self.params.clone();
+        };
+        let pre_y = solver_y.clone();
+        let event = self.runtime.apply_projected_event_update(
+            ProjectedEventUpdateInput {
+                y: &mut solver_y,
+                p: &mut params,
+                t: self.t,
+                tol: SETTLE.tol,
+                event_pre_y: &pre_y,
+                event_pre_p: &pre_p,
+                max_iters: SETTLE.max_iters,
+                row_filter: EventUpdateRowFilter::UnownedOnly,
+                root_relation_overrides: &mut Vec::new(),
+            },
+            |y, p| {
+                let before = y.to_vec();
+                self.runtime.refresh_algebraic_and_output_slots(
+                    self.t,
+                    y,
+                    p,
+                    SETTLE.tol,
+                    SETTLE.max_iters,
+                )?;
+                Ok(before != y)
+            },
+        );
+        match event {
+            Ok(_) => params,
+            Err(_) => self.params.clone(),
         }
     }
 
-    /// Solver-y at `state`, its algebraics settled.
-    fn settle_at(&self, state: &[f64]) -> Result<Vec<f64>, SimulationDiagnosticError> {
-        self.runtime
-            .full_solver_y(
-                self.t,
-                state,
-                &self.model.parameters,
-                SETTLE.tol,
-                SETTLE.max_iters,
-            )
-            .map_err(SimulationDiagnosticError::from)
+    /// `state` settled: its parameters and its algebraics.
+    fn settle_at(&self, state: &[f64]) -> Result<Settled, SimulationDiagnosticError> {
+        let params = self.params_at(state)?;
+        let solver_y =
+            self.runtime
+                .full_solver_y(self.t, state, &params, SETTLE.tol, SETTLE.max_iters)?;
+        Ok(Settled { params, solver_y })
     }
 
     fn derivatives(&self, state: &[f64]) -> Result<Vec<f64>, SimulationDiagnosticError> {
-        self.runtime
-            .eval_state_derivatives(
-                self.t,
-                state,
-                &self.model.parameters,
-                SETTLE.tol,
-                SETTLE.max_iters,
-            )
-            .map_err(SimulationDiagnosticError::from)
+        self.derivatives_in(state, &self.params)
+    }
+
+    /// `der(state)` with the discrete values of `mode`.
+    fn derivatives_in(
+        &self,
+        state: &[f64],
+        mode: &[f64],
+    ) -> Result<Vec<f64>, SimulationDiagnosticError> {
+        let params = self.params_in(state, mode)?;
+        Ok(self.runtime.eval_state_derivatives(
+            self.t,
+            state,
+            &params,
+            SETTLE.tol,
+            SETTLE.max_iters,
+        )?)
+    }
+
+    /// The columns `cols` of `A` at `state`: `columns[row][k] =
+    /// ∂der(state_row)/∂state_cols[k]`, through the algebraics the
+    /// derivatives read only (a leaf algebraic need not be solvable there).
+    fn columns(
+        &self,
+        state: &[f64],
+        cols: &[usize],
+    ) -> Result<Vec<Vec<f64>>, SimulationDiagnosticError> {
+        let params = self.params_at(state)?;
+        let lin = AlgebraicLinearization {
+            t: self.t,
+            params: &params,
+            settle: SETTLE,
+        };
+        let mut seed = vec![0.0; state.len()];
+        let mut column = vec![0.0; state.len()];
+        let mut columns = vec![Vec::with_capacity(cols.len()); state.len()];
+        for &col in cols {
+            seed[col] = 1.0;
+            let result = self
+                .runtime
+                .eval_state_jacobian_v_ad_into(lin, state, &seed, &mut column);
+            seed[col] = 0.0;
+            result?;
+            for (row, value) in columns.iter_mut().zip(&column) {
+                row.push(*value);
+            }
+        }
+        Ok(columns)
     }
 
     /// `(∂der, ∂solver_y)` along the unit seed at `seed` of
-    /// `[solver-y | parameter]`, at a settled `solver_y`.
+    /// `[solver-y | parameter]`, at a settled point.
     fn tangent(
         &self,
-        solver_y: &[f64],
+        at: &Settled,
         seed: usize,
     ) -> Result<(Vec<f64>, Vec<f64>), SimulationDiagnosticError> {
         let mut direction = vec![0.0; self.p_seed_offset + self.model.problem.layout.p_scalars()];
@@ -498,8 +875,12 @@ impl OperatingPoint {
         let mut tangent = vec![0.0; self.runtime.solver_count()];
         self.runtime
             .eval_linearization_tangent_into(
-                self.lin(),
-                solver_y,
+                AlgebraicLinearization {
+                    t: self.t,
+                    params: &at.params,
+                    settle: SETTLE,
+                },
+                &at.solver_y,
                 &direction,
                 &mut tangent,
                 &mut der,
