@@ -21,7 +21,14 @@ pub(super) fn translation_read<'a>(
             .as_deref()
             .unwrap_or(func.name.last_segment()),
     )?;
-    Some((read, ctx.translation_resources()?))
+    static NO_RESOURCES: std::sync::LazyLock<ResourceRoots> =
+        std::sync::LazyLock::new(ResourceRoots::default);
+    let resources = match ctx.translation_resources() {
+        Some(resources) => resources,
+        None if !read.reads_files() => &NO_RESOURCES,
+        None => return None,
+    };
+    Some((read, resources))
 }
 
 /// Bind the row's external arguments in the call environment, evaluate it,

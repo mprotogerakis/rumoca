@@ -730,3 +730,49 @@ end InitialAlgorithmCompetingOwner;
         "two determining owners must be named, got: {rendered}"
     );
 }
+
+const TEXT_LOOKUP: &str = r#"
+model TextLookup
+  pure function compare
+    input String string1;
+    input String string2;
+    input Boolean caseSensitive = true;
+    output Integer result;
+  external "C" result = ModelicaStrings_compare(string1, string2, caseSensitive);
+  end compare;
+  parameter String name = "CO2";
+  constant String names[2] = {"H2O", "CO2"};
+  parameter Integer ind(fixed = false);
+  Real x(start = 0, fixed = true);
+initial algorithm
+  ind := -1;
+  for i in 1:2 loop
+    if compare(names[i], name) == 2 then
+      ind := i;
+    end if;
+  end for;
+  assert(ind > 0, "substance not found");
+equation
+  der(x) = ind;
+end TextLookup;
+"#;
+
+/// The `Modelica.Fluid.Sensors.TraceSubstances` substance lookup: the runtime
+/// owns no String storage, so a String parameter keeps its declared value and
+/// the lookup that compares it is settled at translation.
+#[test]
+fn a_text_lookup_is_settled_at_translation() {
+    let compiled = Compiler::new()
+        .model("TextLookup")
+        .compile_str(TEXT_LOOKUP, "initial_algorithm.mo")
+        .expect("a text lookup has a checked owner");
+    let simulation = simulate_dae(&compiled.dae, &SimOptions::default())
+        .expect("the looked-up index reaches the trajectory");
+    let index = simulation
+        .names
+        .iter()
+        .position(|name| name == "x")
+        .expect("trace keeps x");
+    let x = simulation.data[index].last().copied().unwrap();
+    assert!((x - 2.0).abs() < 1e-9, "x(1) = {x}");
+}
