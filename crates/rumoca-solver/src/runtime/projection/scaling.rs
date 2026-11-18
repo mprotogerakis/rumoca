@@ -39,6 +39,22 @@ pub(super) fn scaled_correction_converged(correction: &[f64], scales: &[f64], to
             .all(|(value, scale)| value.is_finite() && value.abs() <= scaled_tolerance(tol, scale))
 }
 
+/// Units in the last place a residual keeps at the floating-point resolution
+/// of the terms it balances.
+const RESIDUAL_ROUNDING: f64 = 16.0 * f64::EPSILON;
+
+/// Whether every residual is within the rounding of its row's largest term
+/// (`scales`: a row's largest |J_ij| |x_j|).
+pub(super) fn residual_at_rounding(residual: &[f64], scales: &[f64]) -> bool {
+    residual.len() == scales.len()
+        && residual
+            .iter()
+            .zip(scales)
+            .all(|(value, scale)| {
+                value.is_finite() && value.abs() <= RESIDUAL_ROUNDING * valid_variable_scale(*scale)
+            })
+}
+
 pub(super) fn scaled_residual_norm(residual: &[f64], scales: &[f64]) -> f64 {
     if residual.len() != scales.len() {
         return f64::INFINITY;
