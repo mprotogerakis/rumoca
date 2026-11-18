@@ -1627,6 +1627,7 @@ fn lower_record_constructor<'dae>(
                 parameter,
                 shape,
                 &mut active_records,
+                None,
             )?,
         ));
         values.push(lower_expression_scoped(

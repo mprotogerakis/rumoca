@@ -1489,6 +1489,11 @@ impl ShapeAnalyzer<'_> {
         }
         let mut inputs = Vec::with_capacity(arguments.len());
         let mut fields = Vec::with_capacity(arguments.len());
+        // MLS §12.6 makes the fields the constructor's inputs, and MLS §12.2
+        // lets a later input's extent read an earlier one (`Integer nc;
+        // Real a[nc];`), so each settled scalar argument is bound by its
+        // field's name for the fields after it.
+        let mut scope: Option<ShapeEnvironment> = None;
         for (parameter, argument) in constructor.inputs.iter().zip(arguments) {
             let actual = self.discover_expression(argument, values)?;
             inputs.push(actual.clone());
@@ -1496,8 +1501,18 @@ impl ShapeAnalyzer<'_> {
                 parameter,
                 Some(&actual),
                 None,
-                values,
+                scope.as_ref().unwrap_or(values),
             )?);
+            if let Some(value) = actual
+                .is_empty()
+                .then(|| values.fold_value(argument))
+                .flatten()
+                .filter(is_scalar_value)
+            {
+                scope
+                    .get_or_insert_with(|| values.clone())
+                    .bind_scalar_value(VarName::new(&parameter.name), value);
+            }
         }
         let function = name.var_name().clone();
         let input_values = self.keyed_input_values(&function, arguments, values, span);
@@ -2141,13 +2156,40 @@ fn resolve_certificate(
     // MLS §12.2: a record value's declared fields are readable through the
     // joined reference identity Flat renders, so each field carries its own
     // proven shape in the same environment as the value that declares it.
-    for value in function
+    //
+    // MLS §12.4.4/§12.6: a record output or local the body never writes holds
+    // its declaration value, a constructor call, for the whole call. A field's
+    // extent may read a sibling field (`parameter Integer nc = 5; Real a[nc];`,
+    // MSL R134a's Helmholtz coefficient records), so each scalar argument that
+    // settles is bound by its bare name in the record's own scope, where the
+    // siblings' extents are resolved, and by the joined path the body reads
+    // (`res.ns1` as a loop bound).
+    let mut record_scopes: HashMap<VarName, ShapeEnvironment> = HashMap::new();
+    for (ordinal, value) in function
         .inputs
         .iter()
         .chain(&function.outputs)
         .chain(&function.locals)
+        .enumerate()
     {
-        for (path, parent, field) in record_field_projections(value, flat) {
+        let projections = record_field_projections(value, flat);
+        let record = VarName::new(&value.name);
+        let arguments = match &value.default {
+            Some(Expression::FunctionCall {
+                is_constructor: true,
+                args,
+                ..
+            }) if ordinal >= function.inputs.len() && !assigned.contains(&value.name) => {
+                let fields = projections
+                    .iter()
+                    .filter(|(_, parent, _)| *parent == record)
+                    .count();
+                (args.len() == fields).then_some(args.as_slice())
+            }
+            _ => None,
+        };
+        let mut field_ordinal = 0;
+        for (path, parent, field) in projections {
             let mut shape = values.get(&parent).cloned().ok_or_else(|| {
                 ToDaeError::unsupported_flat(
                     "function shape proof",
@@ -2155,8 +2197,29 @@ fn resolve_certificate(
                     field.span,
                 )
             })?;
-            shape.extend(resolve_declared_shape(field, None, None, &values)?);
-            values.insert(path, shape);
+            let scope = record_scopes.get(&parent).unwrap_or(&values);
+            let field_shape = resolve_declared_shape(field, None, None, scope)?;
+            let argument = if parent == record {
+                field_ordinal += 1;
+                arguments.and_then(|args| args.get(field_ordinal - 1))
+            } else {
+                None
+            };
+            shape.extend(field_shape);
+            let settled = argument
+                .filter(|_| shape.is_empty())
+                .and_then(|argument| values.fold_value(argument))
+                .filter(is_scalar_value);
+            match settled {
+                Some(settled) => {
+                    record_scopes
+                        .entry(parent)
+                        .or_insert_with(|| values.clone())
+                        .bind_scalar_value(VarName::new(&field.name), settled.clone());
+                    values.bind_scalar_value(path, settled);
+                }
+                None => values.insert(path, shape),
+            }
         }
     }
     infer_function_integer_bounds(&function.body, &mut values);
