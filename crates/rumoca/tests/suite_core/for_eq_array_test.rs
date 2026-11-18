@@ -37,3 +37,32 @@ fn structured_for_equation_remains_compact_and_simulates_all_rows() {
         );
     }
 }
+
+/// A one-element array body (`ports[i].Xi_outflow = medium.Xi` with `nXi = 1`)
+/// issues one row per point like a scalar body, but its residual is an array,
+/// so the family keeps its rows instead of a binder-substitution template.
+#[test]
+fn a_one_element_array_body_keeps_its_rows() {
+    let mut session = Session::new(SessionConfig::default());
+    session
+        .add_document(
+            "one.mo",
+            "model OneElement Real x[2, 1]; Real y[1]; equation y = {time}; \
+             for i in 1:2 loop x[i, :] = y; end for; end OneElement;",
+        )
+        .expect("fixture parses");
+    let compiled = session
+        .compile_model("OneElement")
+        .expect("a one-element array body compiles");
+    let simulation = simulate_dae(&compiled.dae, &SimOptions::default())
+        .expect("a one-element array body simulates");
+    for name in ["x[1,1]", "x[2,1]"] {
+        let index = simulation
+            .names
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or_else(|| panic!("trace must retain `{name}`"));
+        let value = simulation.data[index].last().copied().unwrap();
+        assert!((value - 1.0).abs() <= 1.0e-12, "{name} = {value}");
+    }
+}

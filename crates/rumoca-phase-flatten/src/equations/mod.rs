@@ -1104,7 +1104,14 @@ fn expand_for_equation(
     // every binder -- including the outer one when this is a nested `for i for j` --
     // stays symbolic. Needed BEFORE the cheapen decision: a parameter-variability
     // family is only cheapenable when its template can rebuild the promoted value.
-    let template = capture_comprehension_template(ctx, indices, equations, prefix, def_map);
+    // MLS §10.6.1: a one-element array equation (`ports[i].Xi_outflow =
+    // medium.Xi` with `nXi = 1`) issues one row per point like a scalar one,
+    // but its residual is an array. A larger one issues a child family whose
+    // projection the lift below adopts; this one has none, so the
+    // binder-substitution view cannot own its body and its rows stay
+    // materialized.
+    let template = capture_comprehension_template(ctx, indices, equations, prefix, def_map)
+        .filter(|_| !has_one_element_array_equation(ctx, equations, prefix));
 
     // A regular family lowered with materialization off keeps only its corner cells
     // (base + one neighbor per binder) with full bodies; the interior cells get a
@@ -1220,6 +1227,38 @@ fn expand_for_equation(
         });
 
     Ok(result)
+}
+
+/// Whether a loop body equation is provably a one-element array equation:
+/// either side's shape is the equation's shape (MLS §10.6.1).
+fn has_one_element_array_equation(
+    ctx: &Context,
+    equations: &[ast::Equation],
+    prefix: &ast::QualifiedName,
+) -> bool {
+    equations.iter().any(|equation| match equation {
+        ast::Equation::Simple { lhs, rhs } => [lhs, rhs].into_iter().any(|side| {
+            matches!(
+                shape_inference::infer_expression_shape(side, prefix, ctx),
+                ExpressionShape::Vector(1) | ExpressionShape::Matrix(1, 1)
+            )
+        }),
+        ast::Equation::For { equations, .. } => {
+            has_one_element_array_equation(ctx, equations, prefix)
+        }
+        ast::Equation::If {
+            cond_blocks,
+            else_block,
+        } => {
+            cond_blocks
+                .iter()
+                .any(|block| has_one_element_array_equation(ctx, &block.eqs, prefix))
+                || else_block
+                    .as_deref()
+                    .is_some_and(|block| has_one_element_array_equation(ctx, block, prefix))
+        }
+        _ => false,
+    })
 }
 
 /// Rows a family body issues at its domain points.
