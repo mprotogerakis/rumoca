@@ -59,9 +59,20 @@ impl ArrayFillSpeller<'_> {
     fn is_array(&self, expression: &rumoca_core::Expression) -> bool {
         match expression {
             rumoca_core::Expression::Array { .. } => true,
+            // A whole array variable, or one read through a slice (`X[1:2]`).
             rumoca_core::Expression::VarRef {
                 name, subscripts, ..
-            } => subscripts.is_empty() && self.arrays.contains(name.var_name()),
+            } => {
+                self.arrays.contains(name.var_name())
+                    && (subscripts.is_empty()
+                        || subscripts.iter().any(|subscript| match subscript {
+                            rumoca_core::Subscript::Colon { .. } => true,
+                            rumoca_core::Subscript::Expr { expr, .. } => {
+                                matches!(**expr, rumoca_core::Expression::Range { .. })
+                            }
+                            rumoca_core::Subscript::Index { .. } => false,
+                        }))
+            }
             _ => false,
         }
     }
