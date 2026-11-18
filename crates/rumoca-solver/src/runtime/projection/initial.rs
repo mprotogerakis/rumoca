@@ -503,6 +503,7 @@ fn solve_coupled_initial_block<M: AlgebraicProjectionModel>(
             settled: false,
         });
     };
+    let delta = trusted_initial_delta(&context, residual, &jacobian, delta);
     let update = accept_initial_block_delta(context, y, delta.as_slice())?;
     tracing::debug!(
         target: "rumoca_solver::projection",
@@ -513,6 +514,92 @@ fn solve_coupled_initial_block<M: AlgebraicProjectionModel>(
         "coupled initial projection block update"
     );
     Ok(update)
+}
+
+/// The largest change, in units of each unknown's own scale, an initial
+/// Newton step may make.
+const INITIAL_STEP_TRUST: f64 = 0.5;
+
+/// Keep an initial Newton step within [`INITIAL_STEP_TRUST`] of every
+/// unknown's scale by Levenberg-Marquardt damping.
+///
+/// A start point can leave directions of an initial block undetermined: a
+/// hydraulic loop whose start pressures are equal carries no flow, so a
+/// volume's steady energy balance `der(T) = 0` holds for every `T`. Newton's
+/// step then divides by a roundoff singular value and is noise in those
+/// directions (a pipe at -7000 K), which a residual-decreasing line search
+/// still accepts. Such a step is replaced by the damped step
+/// `sum_i v_i * sigma_i / (sigma_i^2 + mu) * (u_i . rhs)` over the scaled
+/// Jacobian's singular triplets, with the least damping `mu` that keeps it
+/// within the bound: the determined directions move almost as Newton's step
+/// does (the pressures create flow), a roundoff direction hardly at all, and
+/// the next iterate determines the rest. A step within the bound is kept.
+fn trusted_initial_delta<M: AlgebraicProjectionModel>(
+    context: &InitialBlockDeltaCtx<'_, M>,
+    residual: &[f64],
+    jacobian: &BlockJacobian,
+    delta: DVector<f64>,
+) -> DVector<f64> {
+    let scaled_step = delta
+        .iter()
+        .zip(context.variable_scales)
+        .map(|(value, scale)| (value / valid_variable_scale(*scale)).abs())
+        .fold(0.0_f64, f64::max);
+    if scaled_step <= INITIAL_STEP_TRUST {
+        return delta;
+    }
+    let scaled = scaled_jacobian(jacobian, context.row_scales, context.variable_scales);
+    if !scaled.iter().all(|value| value.is_finite()) {
+        return delta;
+    }
+    let svd = scaled.svd(true, true);
+    let (Some(u), Some(v_t)) = (svd.u.as_ref(), svd.v_t.as_ref()) else {
+        return delta;
+    };
+    let rhs = DVector::from_iterator(
+        residual.len(),
+        residual
+            .iter()
+            .zip(context.row_scales)
+            .map(|(value, scale)| -value / valid_variable_scale(*scale)),
+    );
+    let projections = u.transpose() * &rhs;
+    let damped = |mu: f64| {
+        let mut step = DVector::<f64>::zeros(v_t.ncols());
+        for (index, &sigma) in svd.singular_values.iter().enumerate() {
+            let weight = sigma * projections[index] / (sigma * sigma + mu);
+            if weight.is_finite() {
+                step += v_t.row(index).transpose() * weight;
+            }
+        }
+        step
+    };
+    let top = svd.singular_values.max();
+    if !(top > 0.0 && top.is_finite()) {
+        return delta;
+    }
+    // amax(damped(mu)) falls from Newton's step towards zero as mu grows;
+    // bisect mu in log space for the least damping within the bound.
+    let (mut low, mut high) = (top * top * 1e-32, top * top * 1e16);
+    for _ in 0..64 {
+        let middle = (low * high).sqrt();
+        if damped(middle).amax() <= INITIAL_STEP_TRUST {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    let mut step = damped(high);
+    let reach = step.amax();
+    if reach > INITIAL_STEP_TRUST {
+        step *= INITIAL_STEP_TRUST / reach;
+    }
+    DVector::from_iterator(
+        step.len(),
+        step.iter()
+            .zip(context.variable_scales)
+            .map(|(value, scale)| value * valid_variable_scale(*scale)),
+    )
 }
 
 pub(super) fn trace_initial_projection_block<M: AlgebraicProjectionModel>(
