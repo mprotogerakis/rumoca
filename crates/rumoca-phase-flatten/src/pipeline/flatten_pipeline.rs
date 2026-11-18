@@ -1117,6 +1117,7 @@ pub(crate) fn finalize_flat_model(
     collapse_index_refs_to_known_varrefs(flat)?;
     functions::split_branch_assigned_records(flat)?;
     expand_record_array_field_projections_in_equations(flat);
+    distribute_der_over_arrays(flat);
     // Recheck the decomposed ABI and materialize defaults of any scalar calls
     // introduced by record projection.
     functions::materialize_flat_function_call_args(flat)?;

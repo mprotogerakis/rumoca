@@ -788,3 +788,50 @@ mod tests {
         );
     }
 }
+
+/// `der({a, b})` is `{der(a), der(b)}` (MLS §3.7.4.2: `der` applies
+/// elementwise): a field read over a component array, such as `der(mediums.T)`
+/// in a pipe's `SteadyStateInitial` equations, becomes the array of its
+/// elements' derivatives, each one of a single variable reference.
+pub(crate) fn distribute_der_over_arrays(flat: &mut flat::Model) {
+    use rumoca_core::{BuiltinFunction, Expression, ExpressionRewriter};
+    struct Distributor;
+    impl ExpressionRewriter for Distributor {
+        fn rewrite_expression(&mut self, expr: &Expression) -> Expression {
+            if let Expression::BuiltinCall {
+                function: BuiltinFunction::Der,
+                args,
+                span,
+            } = expr
+                && let [Expression::Array {
+                    elements,
+                    kind,
+                    span: array_span,
+                }] = args.as_slice()
+            {
+                return Expression::Array {
+                    elements: elements
+                        .iter()
+                        .map(|element| {
+                            self.rewrite_expression(&Expression::BuiltinCall {
+                                function: BuiltinFunction::Der,
+                                args: vec![element.clone()],
+                                span: *span,
+                            })
+                        })
+                        .collect(),
+                    kind: *kind,
+                    span: *array_span,
+                };
+            }
+            self.walk_expression(expr)
+        }
+    }
+    for eq in flat
+        .equations
+        .iter_mut()
+        .chain(flat.initial_equations.iter_mut())
+    {
+        eq.residual = Distributor.rewrite_expression(&eq.residual);
+    }
+}
