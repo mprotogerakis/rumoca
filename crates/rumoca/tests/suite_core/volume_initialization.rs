@@ -51,3 +51,28 @@ end ArrayInitial;";
     let expected = 0.5 - 0.4 * (-1.0f64).exp();
     assert!((values[1] - expected).abs() < 1e-5, "Xi = {}", values[1]);
 }
+
+/// A medium function's `h_T = smooth(0, if T < Tlimit then ... else ...)`
+/// (DryAirNasa): past its certificate the guard, inside a function, cannot
+/// own an event, so the conditional differentiates branch-wise without one.
+/// `U = 4*p` while `p < 5`, so the preferred state decays as `exp(-t)` from
+/// its start; a basis withheld for `U` would start at zero instead.
+#[test]
+fn a_preferred_state_is_reached_through_smooth_inside_a_function() {
+    let source = "
+model PreferThroughFunction
+  function h
+    input Real x;
+    output Real y;
+  algorithm
+    y := smooth(0, if x < 5 then x else 2*x - 5);
+  end h;
+  Real p(stateSelect = StateSelect.prefer, start = 1);
+  Real U;
+equation
+  U = 3*p + h(p);
+  der(U) = -U;
+end PreferThroughFunction;";
+    let p = final_values("PreferThroughFunction", source, &["p"])[0];
+    assert!((p - (-1.0f64).exp()).abs() < 1e-5, "p(1) = {p}");
+}
