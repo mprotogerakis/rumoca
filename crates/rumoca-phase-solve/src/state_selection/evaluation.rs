@@ -100,7 +100,11 @@ impl TrialPoint {
             stated_initial_values[target.index() as usize] = (0..variable.scalar_count())
                 .map(|scalar| variable.fixed_scalar(scalar) == Some(true))
                 .collect();
-            retained_guesses[target.index() as usize] = variable.role() == dae::VariableRole::State
+            // A state whose start is zero, the default, holds no initial value
+            // of its own: its causal definition (a volume's `m = V*d`) seeds it.
+            retained_guesses[target.index() as usize] = (variable.role()
+                == dae::VariableRole::State
+                && nonzero_starts[target.index() as usize].contains(&true))
                 || (0..variable.scalar_count())
                     .any(|scalar| variable.fixed_scalar(scalar) == Some(true))
                 || matches!(
