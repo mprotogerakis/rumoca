@@ -1464,6 +1464,44 @@ fn a_row_short_of_states_keeps_the_stated_start_over_the_default_one() {
     );
 }
 
+/// An initial `der(y) = 0` fixes `y`'s steady state, so its row determines `y`
+/// itself before any other state it reaches: here a controller's integrator `x`
+/// (start zero, like `y`, and ahead of it in slot order) that the lag's input
+/// reads, besides a tank's temperature with a start of its own.
+#[test]
+fn a_steady_state_row_determines_its_own_state() {
+    let dae = compile(
+        concat!(
+            "model SteadyLagThroughIntegrator\n",
+            "  Real T(start = 333.15);\n",
+            "  Real x;\n",
+            "  Real y;\n",
+            "  Real u;\n",
+            "equation\n",
+            "  der(T) = 0;\n",
+            "  der(x) = 333.15 - y;\n",
+            "  u = T + x;\n",
+            "  der(y) = (u - y)/10;\n",
+            "initial equation\n",
+            "  der(y) = 0;\n",
+            "end SteadyLagThroughIntegrator;\n",
+        ),
+        "SteadyLagThroughIntegrator",
+    );
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(1.0),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options).expect("the steady lag initializes");
+    let [t, x, y, u] = ["T", "x", "y", "u"].map(|name| column(&result, name)[0]);
+    assert!(
+        (t - 333.15).abs() <= 1.0e-9 && x.abs() <= 1.0e-9 && (y - u).abs() <= 1.0e-9,
+        "T and x keep their starts and the lag starts at its input, got T = {t}, x = {x}, \
+         y = {y}, u = {u}"
+    );
+}
+
 /// When one row must choose, the `fixed = false` parameter takes it.
 ///
 /// MLS 3.6 §8.6 gives such a parameter no value at all without an initialization
