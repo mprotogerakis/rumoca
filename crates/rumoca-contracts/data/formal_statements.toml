@@ -395,7 +395,7 @@ statement = 'Where one initialization equation cannot fix two guessed states, wh
 tier = 'OracleImplied'
 oracle = 'OpenModelica (omc)'
 evidence = 'crates/rumoca-phase-solve/src/lower/initial_projection.rs — the module header, under the two choices this phase makes that the model does not'
-latitude_note = 'Nothing in §8.6 picks between them, because the model states nothing about it. omc warns that the initial conditions are not fully specified and keeps x, solving y = 5; this planner takes the first augmenting assignment in solver-slot order and keeps y, solving x = 2. Neither answer is more correct; the row exists so the choice cannot drift silently.'
+latitude_note = 'Nothing in §8.6 picks between them, because the model states nothing about it. omc warns that the initial conditions are not fully specified and keeps x, solving y = 5; this planner gives the row to a state at the default start zero before a state with a start of its own (the non-normative MLS 3.7 §8.6.2 keeps the most confident starts), then takes the first augmenting assignment in solver-slot order, and keeps y, solving x = 2. Neither answer is more correct; the row exists so the choice cannot drift silently.'
 pin_kind = 'Test'
 pin_file = 'crates/rumoca-sim/src/solve_lowering/tests.rs'
 pin_anchor = 'an_under_determined_state_component_keeps_the_remaining_start_guesses'
