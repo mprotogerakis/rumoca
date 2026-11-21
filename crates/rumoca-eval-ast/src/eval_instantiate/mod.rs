@@ -789,7 +789,7 @@ fn resolve_scalar_declaration_expr<'a>(
         return component_expr_for_structural_eval(component).map(Cow::Borrowed);
     }
 
-    for candidate in enclosing_scope_candidates(dotted.as_str()) {
+    for candidate in enclosing_scope_candidates(dotted.as_str(), env.effective_components) {
         let qualified = ast::QualifiedName::from_dotted(&candidate);
         if let Some(mod_value) = env.mod_env.get(&qualified) {
             return Some(Cow::Borrowed(&mod_value.value));
@@ -1187,7 +1187,7 @@ fn eval_integer_component_ref(
         return recurse(component_expr_for_structural_eval(sibling)?);
     }
 
-    for candidate in enclosing_scope_candidates(dotted.as_str()) {
+    for candidate in enclosing_scope_candidates(dotted.as_str(), env.effective_components) {
         let qn = ast::QualifiedName::from_dotted(&candidate);
         if let Some(mod_value) = env.mod_env.get(&qn) {
             return recurse(&mod_value.value);
