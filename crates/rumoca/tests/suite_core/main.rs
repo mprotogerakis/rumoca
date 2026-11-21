@@ -365,6 +365,7 @@ mod shared_call_refresh;
 mod simulation_work_counts;
 mod singular_active_mode;
 mod singular_algebraic_seed;
+mod singular_residue_after_reduction;
 mod size_of_call_results;
 mod sliding_mode_events;
 mod smooth_index_reduction;
