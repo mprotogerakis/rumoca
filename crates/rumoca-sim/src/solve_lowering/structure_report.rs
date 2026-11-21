@@ -61,6 +61,9 @@ pub fn structural_report_for_dae(
 
 #[derive(Debug, Clone)]
 pub struct SingularityDiagnosis {
+    /// The counts and names are those of the closest system index reduction
+    /// stalled at, not of the source: its reducible parts are reduced.
+    pub after_reduction: bool,
     pub n_equations: usize,
     pub n_unknowns: usize,
     pub n_matched: usize,
@@ -94,61 +97,74 @@ pub fn diagnose_structural_singularity(
         .map_err(structural_error)?
         .or(quotient);
     let model = literal.as_ref().unwrap_or(model);
-    let error = match rumoca_phase_structural::prepare_for_solve(model) {
-        Ok(_) => return Ok(None),
-        Err(error) => error,
+    let (prepared, reduction) = rumoca_phase_structural::inspect_prepare_for_solve(model);
+    let Err(error) = prepared else {
+        return Ok(None);
     };
-    model.inspect(|view| {
-        let rumoca_phase_structural::StructuralError::Singular {
-            n_equations,
-            n_unknowns,
-            n_matched,
+    // The reducer reports the source's singularity. Where it stalled closer,
+    // the reducible parts are reduced (an incompressible volume's `der(m)`),
+    // so what stays unmatched there is what no reduction matches: the defect.
+    let stalled = reduction
+        .stalled
+        .as_ref()
+        .map(|snapshot| snapshot.error())
+        .filter(|stalled| match (unmatched(stalled), unmatched(&error)) {
+            (Some(stalled), Some(source)) => stalled < source,
+            _ => false,
+        });
+    let after_reduction = stalled.is_some();
+    let error = stalled.cloned().unwrap_or(error);
+    let rumoca_phase_structural::StructuralError::Singular {
+        n_equations,
+        n_unknowns,
+        n_matched,
+        unmatched_equations,
+        unmatched_unknowns,
+        ..
+    } = error
+    else {
+        return Err(structural_error(error));
+    };
+    let unknowns = unmatched_unknowns
+        .into_iter()
+        .map(|name| UnmatchedUnknownDiagnosis {
+            category: classify_unknown(&name).to_string(),
+            name,
+            referencing_rows: Vec::new(),
+        })
+        .collect();
+    let equations = unmatched_equations
+        .into_iter()
+        .map(equation_diagnosis)
+        .collect();
+    Ok(Some(SingularityDiagnosis {
+        after_reduction,
+        n_equations,
+        n_unknowns,
+        n_matched,
+        unknowns,
+        equations,
+    }))
+}
+
+fn unmatched(error: &rumoca_phase_structural::StructuralError) -> Option<usize> {
+    match error {
+        rumoca_phase_structural::StructuralError::Singular {
             unmatched_equations,
             unmatched_unknowns,
             ..
-        } = error
-        else {
-            return Err(structural_error(error));
-        };
-        let unknowns = unmatched_unknowns
-            .into_iter()
-            .map(|name| UnmatchedUnknownDiagnosis {
-                category: classify_unknown(&name).to_string(),
-                name,
-                referencing_rows: Vec::new(),
-            })
-            .collect();
-        let equations = unmatched_equations
-            .into_iter()
-            .map(|name| equation_diagnosis(model, view, name))
-            .collect();
-        Ok(Some(SingularityDiagnosis {
-            n_equations,
-            n_unknowns,
-            n_matched,
-            unknowns,
-            equations,
-        }))
-    })
+        } => Some(unmatched_equations.len() + unmatched_unknowns.len()),
+        _ => None,
+    }
 }
 
-fn equation_diagnosis(
-    model: &dae::Dae,
-    view: dae::DaeView<'_>,
-    name: String,
-) -> UnmatchedEquationDiagnosis {
-    let index = name
-        .strip_prefix("f_x[")
-        .and_then(|rest| rest.split(']').next())
-        .and_then(|digits| digits.parse::<usize>().ok());
-    let provenance = index
-        .and_then(|index| view.continuous_owner_for_scalar_row(index))
-        .map(|owner| match owner {
-            dae::ContinuousOwnerView::Residual { equation, .. } => equation.provenance(),
-            dae::ContinuousOwnerView::Structured { family, .. } => family.provenance(),
-        });
-    let source = provenance
-        .and_then(|provenance| model.source_text(provenance))
+/// A row's source text, read off its label `f_x[i] (<text>)`: the label was
+/// spelled in the DAE the singularity was proved on, which after an index
+/// reduction is not `model`, so `i` need not name the same row of `model`.
+fn equation_diagnosis(name: String) -> UnmatchedEquationDiagnosis {
+    let source = name
+        .split_once(" (")
+        .and_then(|(_, text)| text.strip_suffix(')'))
         .unwrap_or("")
         .to_string();
     UnmatchedEquationDiagnosis {
