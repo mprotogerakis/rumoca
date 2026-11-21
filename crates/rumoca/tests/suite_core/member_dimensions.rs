@@ -69,3 +69,43 @@ end MemberDimensions;";
         );
     }
 }
+
+/// `c[p.n]` is p's `n` and `d[r.n]` the record r's, never the enclosing
+/// model's own `n`.
+#[test]
+fn sibling_member_dimension_is_not_the_outer_parameter_of_its_name() {
+    let source = "
+model Shadow
+  model C
+    Real x(start = 1, fixed = true);
+  equation
+    der(x) = -x;
+  end C;
+  model P
+    parameter Integer n = 2;
+  end P;
+  record R
+    parameter Integer n = 2;
+  end R;
+  parameter Integer n = 4;
+  P p(n = 3);
+  R r(n = 3);
+  C c[p.n];
+  C d[r.n];
+end Shadow;";
+    let compiled = Compiler::new()
+        .model("Shadow")
+        .compile_str(source, "Shadow.mo")
+        .unwrap_or_else(|error| panic!("Shadow compiles: {error}"));
+    let names: Vec<String> = compiled.dae.inspect(|view| {
+        view.variables()
+            .map(|(_, variable)| variable.name().as_str().to_owned())
+            .collect()
+    });
+    for name in ["c[3].x", "d[3].x"] {
+        assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+    }
+    for name in ["c[4].x", "d[4].x"] {
+        assert!(!names.iter().any(|n| n == name), "{name} exists");
+    }
+}
