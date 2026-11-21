@@ -89,7 +89,12 @@ fn print_singularity_diagnosis(diagnosis: &rumoca_sim::SingularityDiagnosis) {
     use std::collections::BTreeMap;
 
     println!(
-        "structurally singular: {} of {} equations matched ({} unknowns); {} unmatched:",
+        "structurally singular{}: {} of {} equations matched ({} unknowns); {} unmatched:",
+        if diagnosis.after_reduction {
+            " after index reduction"
+        } else {
+            ""
+        },
         diagnosis.n_matched,
         diagnosis.n_equations,
         diagnosis.n_unknowns,
