@@ -1430,6 +1430,40 @@ fn an_under_determined_state_component_keeps_the_remaining_start_guesses() {
     );
 }
 
+/// A row short of states goes to a state at Real's default start, zero, before
+/// one with a start of its own (MLS 3.7 §8.6.2 keeps the starts given with the
+/// most confidence). A steady-state lag (`y_start = 0`) reading a tank's
+/// temperature solves its own output; the tank keeps its `T_start` although its
+/// solver slot comes first.
+#[test]
+fn a_row_short_of_states_keeps_the_stated_start_over_the_default_one() {
+    let dae = compile(
+        concat!(
+            "model SteadyLag\n",
+            "  Real T(start = 333.15);\n",
+            "  Real y;\n",
+            "equation\n",
+            "  der(T) = 0;\n",
+            "  der(y) = (T - y)/10;\n",
+            "initial equation\n",
+            "  der(y) = 0;\n",
+            "end SteadyLag;\n",
+        ),
+        "SteadyLag",
+    );
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(1.0),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options).expect("the steady lag initializes");
+    let (t, y) = (column(&result, "T")[0], column(&result, "y")[0]);
+    assert!(
+        (t - 333.15).abs() <= 1.0e-9 && (y - 333.15).abs() <= 1.0e-9,
+        "the tank keeps its start and the lag starts at it, got T = {t}, y = {y}"
+    );
+}
+
 /// When one row must choose, the `fixed = false` parameter takes it.
 ///
 /// MLS 3.6 §8.6 gives such a parameter no value at all without an initialization
