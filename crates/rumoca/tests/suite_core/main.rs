@@ -302,6 +302,7 @@ mod package_typed_component_constants;
 mod parameter_comprehension_values;
 mod parameter_inventory;
 mod parameter_relations;
+mod parameter_slice_derivatives;
 mod periodic_source_counter_regression;
 mod phasor_sources;
 mod piecewise_index_reduction;
