@@ -235,6 +235,7 @@ impl Resolver {
         if let Some(type_def_id) = resolved {
             comp.type_name.def_id = Some(type_def_id);
             comp.type_def_id = Some(type_def_id);
+            comp.type_prefix_def_id = self.type_name_package(&comp.type_name, class_scope);
             self.stats.types_fully_resolved += 1;
         } else if !comp.type_name.name.is_empty() {
             self.try_partial_type_resolution(comp, class_scope, qualified_name);
@@ -249,6 +250,24 @@ impl Resolver {
                     .insert(component, component_type);
             }
         }
+    }
+
+    /// The package a qualified type name selects its class from: the
+    /// declaration its prefix (`Medium` of `Medium.BaseProperties`) names,
+    /// when that is a package.
+    fn type_name_package(&self, name: &ast::Name, scope: ScopeId) -> Option<DefId> {
+        let (_, prefix) = name.name.split_last()?;
+        if prefix.is_empty() {
+            return None;
+        }
+        let prefix = ast::Name {
+            name: prefix.to_vec(),
+            def_id: None,
+        };
+        self.resolve_qualified_name(&prefix, scope)
+            .filter(|package| {
+                self.class_types.get(package) == Some(&rumoca_core::ClassType::Package)
+            })
     }
 
     fn dynamic_type_root(&self, name: &ast::Name, scope: ScopeId) -> Option<DefId> {

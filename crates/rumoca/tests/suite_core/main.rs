@@ -312,6 +312,7 @@ mod overdetermined_rooted_consistency;
 mod override_promoted_array_mask;
 mod package_constant_record_per_package;
 mod package_exposed_function_constants;
+mod package_typed_component_constants;
 mod parameter_comprehension_values;
 mod parameter_inventory;
 mod parameter_relations;
