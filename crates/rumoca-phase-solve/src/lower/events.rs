@@ -1714,7 +1714,14 @@ fn lower_guarded_targets<'dae>(
             .scalar_compiler(view, None)
             .with_function_conditional_owners(&conditional_owners);
         if is_ordinary_target(clocks, group[0].variable) {
-            compiler = compiler.with_current_definitions(definition_owner.clone());
+            // An unclocked group reruns in every settle pass; a clocked one
+            // executes once at its tick.
+            let owner = definition_owner.clone();
+            compiler = compiler.with_current_definitions(if clock.is_none() {
+                owner.settled()
+            } else {
+                owner
+            });
         }
         let program = compiler.guarded_assignment_group_program(
             clock.map(|(clock, _)| clock).or(event_clock),

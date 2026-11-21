@@ -14,12 +14,16 @@ pub(in crate::lower) struct DefinitionOwner<'dae> {
     definitions: Rc<rumoca_phase_structural::SameTickDefinitions<'dae>>,
     targets: Rc<BTreeSet<u32>>,
     facts: Rc<RefCell<DefinitionFacts>>,
+    /// The event settle pass reruns this owner's programs after every
+    /// algebraic projection (an unclocked event owner).
+    settled: bool,
 }
 
 impl PartialEq for DefinitionOwner<'_> {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.definitions, &other.definitions)
             && Rc::ptr_eq(&self.targets, &other.targets)
+            && self.settled == other.settled
     }
 }
 impl Eq for DefinitionOwner<'_> {}
@@ -33,7 +37,16 @@ impl<'dae> DefinitionOwner<'dae> {
             definitions,
             targets,
             facts: Rc::new(RefCell::new(BTreeMap::new())),
+            settled: false,
         }
+    }
+
+    /// The owner of programs the event settle pass reruns after every
+    /// algebraic projection, until the discrete values and the projection
+    /// agree (or the coupled event solve settles them).
+    pub(in crate::lower) fn settled(mut self) -> Self {
+        self.settled = true;
+        self
     }
 
     fn facts(
@@ -102,6 +115,13 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let Some(definition) = owner.definitions.definition(variable) else {
             return Ok(None);
         };
+        // A projection that re-enters its own coordinate went around an
+        // algebraic loop of exact definitions. A settled owner reads it from
+        // the algebraic projection, which solves the loop as a coupled block;
+        // the settle pass reruns the program until both agree.
+        if owner.settled && self.active_current_definitions.contains(&variable) {
+            return Ok(None);
+        }
         if !owner.facts(self.view, variable, definition)?.0 {
             return Ok(None);
         }
