@@ -907,6 +907,11 @@ pub(super) fn is_time_invariant<'dae>(
         } => operands
             .iter()
             .all(|operand| is_time_invariant(view, operand)),
+        dae::ExpressionOperation::Range(_) => true,
+        dae::ExpressionOperation::Index { base, subscripts } => {
+            is_time_invariant(view, base)
+                && super::tensor_maps::has_invariant_subscripts(view, subscripts)
+        }
         _ => false,
     }
 }
