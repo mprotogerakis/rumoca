@@ -1381,7 +1381,35 @@ fn index_array_expression_for_element(
                 ),
             )
         }
+        ast::Expression::FunctionCall { comp, args, .. } if comp.parts.len() == 1 => Ok(
+            constructor_element(comp.parts[0].ident.text.as_ref(), args, indices.len(), expr),
+        ),
         _ => Ok(None),
+    }
+}
+
+/// An element of `fill(v, n)`, `ones(n)` or `zeros(n)` whose sizes are the
+/// component array's (MLS §10.3.3): `v`, 1 or 0. It is known without the
+/// sizes, which may be parameters of a sibling not evaluated here.
+fn constructor_element(
+    name: &str,
+    args: &[ast::Expression],
+    rank: usize,
+    call: &ast::Expression,
+) -> Option<ast::Expression> {
+    let literal = |text: &str| ast::Expression::Terminal {
+        terminal_type: ast::TerminalType::UnsignedInteger,
+        token: rumoca_core::Token {
+            text: text.into(),
+            ..rumoca_core::Token::default()
+        },
+        span: call.span(),
+    };
+    match name {
+        "fill" if args.len() == rank + 1 => Some(args[0].clone()),
+        "ones" if args.len() == rank => Some(literal("1")),
+        "zeros" if args.len() == rank => Some(literal("0")),
+        _ => None,
     }
 }
 
