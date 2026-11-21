@@ -86,14 +86,17 @@
 //! ("The initial conditions are not fully specified") and keeps `x`, solving
 //! `y = 5`. The normative §8.6 picks neither; its non-normative §8.6.2 (3.7)
 //! keeps the starts given with the most confidence. This planner gives a row to
-//! a state at Real's default start, zero, before a state with a start of its
-//! own, and otherwise takes the first augmenting assignment in solver-slot
-//! order: `x(start = 0)`, `y(start = 3)` keeps `y`, solving `x = 2`, and a
-//! steady-state `FirstOrder` (`y_start = 0`) reading a tank's temperature
-//! solves its own output instead of the tank's `T_start`. The choice is pinned
-//! by `an_under_determined_state_component_keeps_the_remaining_start_guesses`
-//! and `a_row_short_of_states_keeps_the_stated_start_over_the_default_one` so
-//! it stays a recorded fact rather than drift.
+//! a state an initial `der(s) = …` is about first (that equation fixes `s`'s
+//! steady state), then to a state at Real's default start, zero, before a state
+//! with a start of its own, and otherwise takes the first augmenting assignment
+//! in solver-slot order: `x(start = 0)`, `y(start = 3)` keeps `y`, solving
+//! `x = 2`, and a steady-state `FirstOrder` (`y_start = 0`) reading a tank's
+//! temperature through a controller's integrator solves its own output instead
+//! of the tank's `T_start` or the integrator's start. The choice is pinned by
+//! `an_under_determined_state_component_keeps_the_remaining_start_guesses`,
+//! `a_row_short_of_states_keeps_the_stated_start_over_the_default_one` and
+//! `a_steady_state_row_determines_its_own_state` so it stays a recorded fact
+//! rather than drift.
 //!
 //! **Which root of a nonlinear initialization block.** §8.6 says the `start` value
 //! "is used as a guess value", and Newton from that guess converges to whichever
@@ -152,6 +155,8 @@ pub(super) struct InitializationUnknownSpace<'a, 'dae> {
     /// Y-slot indices of the states whose `start` holds a value of its own: it
     /// evaluates to a nonzero number, or does not evaluate at translation.
     stated_starts: BTreeSet<usize>,
+    /// Y-slot indices of the states an initial equation `der(s) = …` is about.
+    derivative_stated: BTreeSet<usize>,
     /// The declared `nominal` of each `fixed = false` parameter scalar the
     /// projection solves, keyed by P-slot index (MLS §4.8.1).
     parameter_nominals: HashMap<usize, f64>,
@@ -189,6 +194,7 @@ pub(super) fn initialization_unknown_space<'a, 'dae>(
         ownership,
         derivatives,
         stated_starts: stated_state_starts(view, &states),
+        derivative_stated: derivative_stated_states(view, &states),
         states,
         given_state_indices: given_state_indices.iter().copied().collect(),
         parameter_nominals: parameter_nominals(view, ownership)?,
@@ -351,6 +357,56 @@ fn stated_state_starts(
     stated
 }
 
+/// The states an initial equation states the derivative of, `der(s) = …` or
+/// `… = der(s)`: MSL's `initType = SteadyState` writes `der(y) = 0`. Such an
+/// equation fixes `s`'s steady state, not the state of whatever `s`'s dynamics
+/// read, so `s` is the first a short component's rows determine.
+fn derivative_stated_states(
+    view: dae::DaeView<'_>,
+    states: &HashMap<(u32, usize), usize>,
+) -> BTreeSet<usize> {
+    let operation = |expression| view.expression(expression).map(|node| node.operation());
+    let mut stated = BTreeSet::new();
+    for owner in view.initialization_owners() {
+        let dae::InitializationOwnerView::Residual { equation, .. } = owner else {
+            continue;
+        };
+        let Some(dae::ExpressionOperation::Binary {
+            operator: dae::BinaryOperator::Subtract | dae::BinaryOperator::ElementwiseSubtract,
+            lhs,
+            rhs,
+        }) = operation(equation.residual())
+        else {
+            continue;
+        };
+        for side in [lhs, rhs] {
+            let Some(dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(state))) =
+                operation(side)
+            else {
+                continue;
+            };
+            for scalar in 0..scalar_count(view, equation.residual()) {
+                stated.extend(states.get(&(state.index(), scalar)));
+            }
+        }
+    }
+    stated
+}
+
+impl InitializationUnknownSpace<'_, '_> {
+    /// When a component's matching reaches an unknown, lowest first: a
+    /// `fixed = false` parameter, a state an initial `der(s) = …` is about, a
+    /// state at the default start, a state with a start of its own.
+    fn matching_tier(&self, unknown: InitialUnknown) -> u8 {
+        match unknown {
+            InitialUnknown::Parameter(_) => 0,
+            InitialUnknown::State(index) if self.derivative_stated.contains(&index) => 1,
+            InitialUnknown::State(index) if !self.stated_starts.contains(&index) => 2,
+            InitialUnknown::State(_) => 3,
+        }
+    }
+}
+
 /// Where one initialization row's coordinate incidence is read from.
 ///
 /// The three forms differ in what the walk may start from, not in what it proves.
@@ -434,7 +490,8 @@ pub(super) fn plan_initialization_projection<'dae>(
     }
     let mut blocks = Vec::new();
     for component in connected_components(&incidence) {
-        let matched = match_component(&component, &space.stated_starts).unwrap_or_default();
+        let matched =
+            match_component(&component, |unknown| space.matching_tier(unknown)).unwrap_or_default();
         record_component_roles(&component, &matched, &mut row_roles);
         if matched.is_empty() {
             continue;
@@ -924,11 +981,12 @@ impl<'dae> InitialIncidence<'dae> {
 /// cost matrix or dual potentials appear.
 /// Augmenting never un-matches an unknown, so running the parameters first (their
 /// `InitialUnknown` ordering) guarantees the maximum number of them is covered.
-/// The states at the default start run next, so a short component's rows leave
-/// a state the start it was given (MLS 3.7 §8.6.2 keeps the most confident).
+/// The states an initial `der(s) = …` is about run next, then the states at the
+/// default start, so a short component's rows leave a state the start it was
+/// given (MLS 3.7 §8.6.2 keeps the most confident); `tier` says which is which.
 fn match_component(
     component: &ProjectionComponent,
-    stated_starts: &BTreeSet<usize>,
+    tier: impl Fn(InitialUnknown) -> u8,
 ) -> Option<Vec<(usize, InitialUnknown)>> {
     let row_count = component.rows.len();
     let unknown_count = component.unknowns.len();
@@ -953,12 +1011,9 @@ fn match_component(
         row_of_unknown: vec![None; unknown_count],
         unknown_of_row: vec![None; row_count],
     };
-    // States at the default start come before states with a start of their
-    // own; the stable sort keeps the parameters first and solver-slot order.
+    // The stable sort keeps solver-slot order within a tier.
     let mut order = (0..unknown_count).collect::<Vec<_>>();
-    order.sort_by_key(|&u| {
-        matches!(component.unknowns[u], InitialUnknown::State(i) if stated_starts.contains(&i))
-    });
+    order.sort_by_key(|&unknown| tier(component.unknowns[unknown]));
     for start in order {
         if !matching.augment_from(start, &adjacency) && component.unknowns[start].is_parameter() {
             return None;
