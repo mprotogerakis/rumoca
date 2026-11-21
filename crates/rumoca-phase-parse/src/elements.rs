@@ -498,6 +498,7 @@ fn process_single_component(
         def_id: None,
         type_id: None,
         type_def_id: None,
+        type_prefix_def_id: None,
         name: c.declaration.ident.text.to_string(),
         name_token: c.declaration.ident.clone(),
         type_name: ctx.type_name.clone(),
