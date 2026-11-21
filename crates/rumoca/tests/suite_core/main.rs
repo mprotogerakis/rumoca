@@ -121,6 +121,7 @@ mod event_commutation;
 mod event_inductive_commutation;
 mod event_iteration_entry;
 mod event_latch_cascade;
+mod event_read_algebraic_loop;
 mod event_relation_cascade;
 mod extends_modified_constant_dimensions;
 mod external_builtin_math;
