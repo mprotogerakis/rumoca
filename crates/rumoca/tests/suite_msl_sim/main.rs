@@ -5,6 +5,7 @@
 mod fixed_delay_stepped;
 mod fourbar_connect_order;
 mod linearization_msl;
+mod mixing_loop_event_read;
 mod move_supplied_derivative;
 mod msl_sim_regression;
 mod post_commit_projection;
