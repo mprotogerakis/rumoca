@@ -1142,7 +1142,7 @@ fn eval_integer_shape_component_ref(
         return recurse(super::component_expr_for_structural_eval(component)?);
     }
 
-    for candidate in super::enclosing_scope_candidates(dotted.as_str()) {
+    for candidate in super::enclosing_scope_candidates(dotted.as_str(), effective_components) {
         let qn = ast::QualifiedName::from_dotted(&candidate);
         if let Some(mod_value) = mod_env.get(&qn) {
             return recurse(&mod_value.value);
