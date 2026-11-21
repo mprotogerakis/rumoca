@@ -264,6 +264,7 @@ mod linearization_trim;
 mod loop_guard_regions;
 mod loop_guarded_smooth_relations;
 mod matrix_reduction_dimensions;
+mod member_dimensions;
 mod mlir_verification_wiring;
 mod mod_propagation_test;
 mod model_algorithm_continuous;
