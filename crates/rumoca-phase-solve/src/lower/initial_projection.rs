@@ -84,11 +84,16 @@
 //! **Which under-determined state keeps its guess.** For `x + y = 5` over two
 //! guessed states, one equation cannot fix two coordinates. OpenModelica warns
 //! ("The initial conditions are not fully specified") and keeps `x`, solving
-//! `y = 5`; this planner takes the first augmenting assignment in solver-slot
-//! order and keeps `y`, solving `x = 2`. Nothing in §8.6 picks between them,
-//! because the model states nothing about it. The choice is pinned by
-//! `an_under_determined_state_component_keeps_the_remaining_start_guesses` so it
-//! stays a recorded fact rather than drift.
+//! `y = 5`. The normative §8.6 picks neither; its non-normative §8.6.2 (3.7)
+//! keeps the starts given with the most confidence. This planner gives a row to
+//! a state at Real's default start, zero, before a state with a start of its
+//! own, and otherwise takes the first augmenting assignment in solver-slot
+//! order: `x(start = 0)`, `y(start = 3)` keeps `y`, solving `x = 2`, and a
+//! steady-state `FirstOrder` (`y_start = 0`) reading a tank's temperature
+//! solves its own output instead of the tank's `T_start`. The choice is pinned
+//! by `an_under_determined_state_component_keeps_the_remaining_start_guesses`
+//! and `a_row_short_of_states_keeps_the_stated_start_over_the_default_one` so
+//! it stays a recorded fact rather than drift.
 //!
 //! **Which root of a nonlinear initialization block.** §8.6 says the `start` value
 //! "is used as a guess value", and Newton from that guess converges to whichever
@@ -144,6 +149,9 @@ pub(super) struct InitializationUnknownSpace<'a, 'dae> {
     derivatives: &'a ContinuousRowIndex<'dae>,
     states: HashMap<(u32, usize), usize>,
     given_state_indices: BTreeSet<usize>,
+    /// Y-slot indices of the states whose `start` holds a value of its own: it
+    /// evaluates to a nonzero number, or does not evaluate at translation.
+    stated_starts: BTreeSet<usize>,
     /// The declared `nominal` of each `fixed = false` parameter scalar the
     /// projection solves, keyed by P-slot index (MLS §4.8.1).
     parameter_nominals: HashMap<usize, f64>,
@@ -175,11 +183,13 @@ pub(super) fn initialization_unknown_space<'a, 'dae>(
         derivatives,
         given_state_indices,
     } = inputs;
+    let states = state_initial_slots(view, layout)?;
     let mut space = InitializationUnknownSpace {
         view,
         ownership,
         derivatives,
-        states: state_initial_slots(view, layout)?,
+        stated_starts: stated_state_starts(view, &states),
+        states,
         given_state_indices: given_state_indices.iter().copied().collect(),
         parameter_nominals: parameter_nominals(view, ownership)?,
         settled_discretes: BTreeSet::new(),
@@ -311,6 +321,36 @@ fn state_initial_slots(
     Ok(slots)
 }
 
+/// The states whose `start` holds a value of its own.
+///
+/// Zero is Real's default `start` (MLS §4.9), so a state left at it, directly or
+/// through a parameter at its default (`FirstOrder`'s `y_start = 0`), states no
+/// initial value: it is the first a short component's rows determine. A start
+/// that does not evaluate at translation reads something it was given.
+fn stated_state_starts(
+    view: dae::DaeView<'_>,
+    states: &HashMap<(u32, usize), usize>,
+) -> BTreeSet<usize> {
+    let mut evaluator = rumoca_eval_dae::NumericEvaluator::new(view);
+    let mut stated = BTreeSet::new();
+    for (id, variable) in view.variables() {
+        if variable.role() != dae::VariableRole::State {
+            continue;
+        }
+        let values = evaluator.initial_value(id).ok().map(|mut values| {
+            variable.broadcast_values(&mut values);
+            values
+        });
+        for scalar in 0..variable.scalar_count() {
+            let default = values.as_ref().and_then(|values| values.get(scalar)) == Some(&0.0);
+            if let (false, Some(index)) = (default, states.get(&(id.index(), scalar))) {
+                stated.insert(*index);
+            }
+        }
+    }
+    stated
+}
+
 /// Where one initialization row's coordinate incidence is read from.
 ///
 /// The three forms differ in what the walk may start from, not in what it proves.
@@ -394,7 +434,7 @@ pub(super) fn plan_initialization_projection<'dae>(
     }
     let mut blocks = Vec::new();
     for component in connected_components(&incidence) {
-        let matched = match_component(&component).unwrap_or_default();
+        let matched = match_component(&component, &space.stated_starts).unwrap_or_default();
         record_component_roles(&component, &matched, &mut row_roles);
         if matched.is_empty() {
             continue;
@@ -884,7 +924,12 @@ impl<'dae> InitialIncidence<'dae> {
 /// cost matrix or dual potentials appear.
 /// Augmenting never un-matches an unknown, so running the parameters first (their
 /// `InitialUnknown` ordering) guarantees the maximum number of them is covered.
-fn match_component(component: &ProjectionComponent) -> Option<Vec<(usize, InitialUnknown)>> {
+/// The states at the default start run next, so a short component's rows leave
+/// a state the start it was given (MLS 3.7 §8.6.2 keeps the most confident).
+fn match_component(
+    component: &ProjectionComponent,
+    stated_starts: &BTreeSet<usize>,
+) -> Option<Vec<(usize, InitialUnknown)>> {
     let row_count = component.rows.len();
     let unknown_count = component.unknowns.len();
     let position: HashMap<InitialUnknown, usize> = component
@@ -908,7 +953,13 @@ fn match_component(component: &ProjectionComponent) -> Option<Vec<(usize, Initia
         row_of_unknown: vec![None; unknown_count],
         unknown_of_row: vec![None; row_count],
     };
-    for start in 0..unknown_count {
+    // States at the default start come before states with a start of their
+    // own; the stable sort keeps the parameters first and solver-slot order.
+    let mut order = (0..unknown_count).collect::<Vec<_>>();
+    order.sort_by_key(|&u| {
+        matches!(component.unknowns[u], InitialUnknown::State(i) if stated_starts.contains(&i))
+    });
+    for start in order {
         if !matching.augment_from(start, &adjacency) && component.unknowns[start].is_parameter() {
             return None;
         }

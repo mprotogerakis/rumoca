@@ -11,5 +11,6 @@ mod post_commit_projection;
 mod r134a_two_phase;
 mod selected_medium_through_alias_chain;
 mod state_jacobian_oracle;
+mod steady_lag_beside_tank;
 mod trace_substances_room;
 mod trajectory_sensitivity_msl;
