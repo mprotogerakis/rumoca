@@ -1360,7 +1360,7 @@ fn eval_integer_record_field_ref(
     let root_comp = env.effective_components.get(root_name)?;
     let record_class = record_class_for_component(env.tree, root_comp)?;
     if record_class.class_type != rumoca_core::ClassType::Record {
-        return None;
+        return eval_integer_member_ref(root_name, root_comp, record_class, field_name, env, depth);
     }
 
     // MLS §§7.2, 12.6: a whole-record binding owns its field values, including
@@ -1418,6 +1418,76 @@ fn eval_integer_record_field_ref(
     }
 
     None
+}
+
+/// A parameter of a sibling component that is no record, as in
+/// `FixedHeatFlow heat[pipe.nNodes]` (MLS §10.1: a dimension is any
+/// parameter expression of its scope).
+///
+/// The component's modifier (`pipe(nNodes = 5)`) is an expression of this
+/// scope and is read here. The class default is an expression of the
+/// component's own scope: it is read there, with the members the component
+/// modifies standing for their modified values and never for their defaults.
+/// An `outer` component (its value is its `inner`'s), a replaceable one, one
+/// that redeclares anything, or one modified from further out leaves the
+/// default undecided.
+fn eval_integer_member_ref(
+    root_name: &str,
+    root_comp: &ast::Component,
+    class: &ast::ClassDef,
+    member_name: &str,
+    env: IntegerEvalEnv<'_>,
+    depth: usize,
+) -> Option<i64> {
+    let modified_from_outside = env
+        .mod_env
+        .active
+        .keys()
+        .any(|key| key.parts.first().is_some_and(|(name, _)| name == root_name));
+    if root_comp.outer || root_comp.is_replaceable || modified_from_outside {
+        return None;
+    }
+    let eval_here = |expr| {
+        try_eval_integer_expr_with_depth_and_locals(
+            expr,
+            env.mod_env,
+            env.effective_components,
+            env.tree,
+            env.resolve_class_components,
+            depth + 1,
+            None,
+        )
+    };
+    if let Some(modifier) = root_comp.modifications.get(member_name) {
+        return eval_here(modifier);
+    }
+    if root_comp
+        .source_modification_redeclare_flags
+        .contains(&true)
+    {
+        return None;
+    }
+    let mut members = (env.resolve_class_components)(env.tree, class);
+    let default = component_expr_for_structural_eval(members.get(member_name)?)?.clone();
+    let mut modified_values = FxHashMap::default();
+    for (name, modifier) in &root_comp.modifications {
+        let Some(member) = members.get_mut(name) else {
+            continue;
+        };
+        member.binding = None;
+        if let Some(value) = eval_here(modifier) {
+            modified_values.insert(name.clone(), value);
+        }
+    }
+    try_eval_integer_expr_with_depth_and_locals(
+        &default,
+        &ast::ModificationEnvironment::default(),
+        &members,
+        env.tree,
+        env.resolve_class_components,
+        depth + 1,
+        Some(&modified_values),
+    )
 }
 
 fn record_class_for_component<'a>(
