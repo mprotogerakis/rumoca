@@ -1467,7 +1467,8 @@ fn instantiate_component(
             type_reference_root_def_id: (comp.type_name.name.len() > 1)
                 .then_some(comp.type_name.def_id)
                 .flatten()
-                .filter(|root_def_id| Some(*root_def_id) != comp.type_def_id),
+                .filter(|root_def_id| Some(*root_def_id) != comp.type_def_id)
+                .or(comp.type_prefix_def_id),
             declaration_source_scope: declaration_source_scope.clone(),
             class_overrides: class_overrides.clone(),
             has_forwarding_class_redeclare,

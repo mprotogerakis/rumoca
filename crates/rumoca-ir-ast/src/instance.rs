@@ -546,6 +546,8 @@ pub struct InstanceData {
     ///
     /// For `Medium.State`, this identifies the `Medium` class/package slot
     /// without recovering semantic structure from the rendered type name.
+    /// A statically resolved type names the package it is taken from
+    /// (`Component::type_prefix_def_id`).
     pub type_reference_root_def_id: Option<DefId>,
     /// Lexical scope where this component declaration was written.
     #[serde(default)]

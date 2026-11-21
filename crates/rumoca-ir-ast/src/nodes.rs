@@ -72,6 +72,14 @@ pub struct Component {
     /// None for built-in types (Real, Integer, Boolean, String).
     /// Populated during name resolution, used by instantiate phase for O(1) type lookup.
     pub type_def_id: Option<DefId>,
+    /// The package a qualified type name takes its class from, when Resolve
+    /// settles the name statically: `Medium` in `Medium.BaseProperties` with
+    /// `package Medium = Modelica.Media.Air.MoistAir`, or
+    /// `Modelica.Media.Air.MoistAir` itself. MLS 3.7 §5.3.2 and §7.1 make the
+    /// class an element of that package, so the package constants it reads are
+    /// that package's (a replaceable `Medium` is resolved at instantiation).
+    #[serde(default)]
+    pub type_prefix_def_id: Option<DefId>,
     pub name: String,
     /// The token for the component name with exact source location
     pub name_token: Token,
@@ -223,6 +231,7 @@ impl Component {
             def_id: None,
             type_id: None,
             type_def_id: None,
+            type_prefix_def_id: None,
             name: String::new(),
             name_token: Token::default(),
             type_name: Name::default(),
