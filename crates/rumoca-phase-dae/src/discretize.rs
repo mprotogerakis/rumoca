@@ -129,6 +129,8 @@ struct Added {
     /// a discrete variable's value before the first tick (an initial equation `pre(v) = e`, else
     /// its start): its memory's start
     pre_starts: HashMap<String, Expression>,
+    /// the memory of each variable `pre` reads (one for all its reads)
+    of: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -212,7 +214,38 @@ impl ExpressionVisitor for Refs {
 }
 impl flat::StatementVisitor for Refs {}
 
+/// A parameter expression's number (a literal, a parameter bound to one, arithmetic of them).
+fn number(e: &Expression, m: &flat::Model, depth: usize) -> Option<f64> {
+    if depth > 16 {
+        return None;
+    }
+    match e {
+        Expression::Literal { value: Literal::Real(v), .. } => Some(*v),
+        Expression::Literal { value: Literal::Integer(v), .. } => Some(*v as f64),
+        Expression::VarRef { name, subscripts, .. } if subscripts.is_empty() => {
+            let v = m.variables.get(name.var_name())?;
+            if !matches!(v.variability, Variability::Parameter(_) | Variability::Constant(_)) {
+                return None;
+            }
+            number(v.binding.as_ref().or(v.start.as_ref())?, m, depth + 1)
+        }
+        Expression::Unary { op: OpUnary::Minus, rhs, .. } => Some(-number(rhs, m, depth + 1)?),
+        Expression::Binary { op, lhs, rhs, .. } => {
+            let (a, b) = (number(lhs, m, depth + 1)?, number(rhs, m, depth + 1)?);
+            match op {
+                OpBinary::Add => Some(a + b),
+                OpBinary::Sub => Some(a - b),
+                OpBinary::Mul => Some(a * b),
+                OpBinary::Div => Some(a / b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 struct Scope<'a> {
+    model: &'a flat::Model,
     states: &'a HashSet<VarName>,
     when_set: &'a HashSet<String>,
     kinds: &'a HashMap<String, Kind>,
@@ -234,7 +267,32 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
             }
             Expression::VarRef { name, subscripts, .. } if name.var_name().as_str() == "time" && subscripts.is_empty() => Some(added.time(scope.period)),
             Expression::BuiltinCall { function: BuiltinFunction::Initial, .. } => Some(added.initial()),
-            Expression::BuiltinCall { function: f @ (BuiltinFunction::Delay | BuiltinFunction::Terminal), span, .. } => {
+            // (a delay of a fixed time: its value that many cycles ago, through a chain of memories
+            // filled with its value at the first tick)
+            Expression::BuiltinCall { function: BuiltinFunction::Delay, args, span } => {
+                let (Some(u), Some(t)) = (args.first(), args.get(1)) else { return Err(refuse("discretization", "delay() of a value and a time", *span)) };
+                let t = number(t, scope.model, 0).ok_or_else(|| refuse("discretization", "delay() of a time not fixed by parameters: not exported as code", *span))?;
+                let n = (t / scope.period).round();
+                if !(0.0..=100_000.0).contains(&n) {
+                    return Err(refuse("discretization", format!("delay() of {t} s: {n} cycles"), *span));
+                }
+                let mut u = u.clone();
+                observe(&mut u, scope, added)?;
+                if n < 1.0 {
+                    return Ok(Some(u));
+                }
+                // (the delayed value a memory of the tick too: read where the tick's values are
+                // taken over already, pre would give the newest)
+                let first = added.initial();
+                let mut last = String::new();
+                for k in 0..n as usize {
+                    let feed = if k == 0 { u.clone() } else { pre(var(&last)) };
+                    last = added.memory("delay", Kind::Real, select(vec![(first.clone(), u.clone())], feed), None);
+                }
+                let out = added.memory("delayed", Kind::Real, select(vec![(first, u)], pre(var(&last))), None);
+                Some(var(&out))
+            }
+            Expression::BuiltinCall { function: f @ BuiltinFunction::Terminal, span, .. } => {
                 return Err(refuse("discretization", format!("{}() in a model exported as code run once a period", f.name()), *span));
             }
             Expression::BuiltinCall { function: BuiltinFunction::Edge, args, span } => {
@@ -261,8 +319,15 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
                 [Expression::VarRef { name, subscripts, .. }] if subscripts.is_empty() && !scope.when_set.contains(name.var_name().as_str()) && !scope.states.contains(name.var_name()) => {
                     let n = name.var_name().as_str();
                     let kind = scope.kinds.get(n).copied().ok_or_else(|| refuse("discretization", format!("pre() of {n}"), *span))?;
-                    let before = added.pre_starts.get(n).cloned();
-                    let m = added.memory(&format!("of.{n}"), kind, var(n), before);
+                    let m = match added.of.get(n) {
+                        Some(m) => m.clone(),
+                        None => {
+                            let before = added.pre_starts.get(n).cloned();
+                            let m = added.memory(&format!("of.{n}"), kind, var(n), before);
+                            added.of.insert(n.to_string(), m.clone());
+                            m
+                        }
+                    };
                     Some(pre(var(&m)))
                 }
                 _ => None,
@@ -357,7 +422,8 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     };
     let kinds: HashMap<String, Kind> = m.variables.iter().filter_map(|(n, v)| Some((n.as_str().to_string(), kind_of(v.type_id)?))).collect();
     let mut added = Added { taken: m.variables.keys().map(|n| n.as_str().to_string()).collect(), ..Default::default() };
-    let scope = Scope { states: &states, when_set: &when_set, kinds: &kinds, period };
+    let model_before = m.clone();
+    let scope = Scope { model: &model_before, states: &states, when_set: &when_set, kinds: &kinds, period };
 
     // an algorithm over the states or time: not yet
     for alg in &m.algorithms {
@@ -380,6 +446,12 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     };
     let mut starts: Vec<(VarName, Expression)> = vec![];
     let mut pre_starts: Vec<(VarName, Expression)> = vec![];
+    let mut first_tick: Vec<(VarName, Expression)> = vec![];
+    let has_der = |e: &Expression| {
+        let mut d: Vec<VarName> = vec![];
+        e.collect_state_variables(&mut d);
+        !d.is_empty()
+    };
     for eq in &m.initial_equations {
         let pre_of = |e: &Expression| match e {
             Expression::BuiltinCall { function: BuiltinFunction::Pre, args, .. } => match args.as_slice() {
@@ -397,13 +469,28 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
             },
             _ => None,
         };
+        // (a state's of anything but parameters, as `y = u`: its value at the first tick)
+        let found = found.or_else(|| match &eq.residual {
+            Expression::Binary { op: OpBinary::Sub, lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
+                (Expression::VarRef { name, subscripts, .. }, e) | (e, Expression::VarRef { name, subscripts, .. })
+                    if subscripts.is_empty() && states.contains(name.var_name()) && !has_der(e) => {
+                    first_tick.push((name.var_name().clone(), e.clone()));
+                    Some((name.var_name().clone(), e.clone(), false))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        if found.as_ref().is_some_and(|(x, _, pre)| !pre && first_tick.iter().any(|(y, _)| y == x)) {
+            continue;
+        }
         match found {
             Some((v, e, true)) => {
                 added.pre_starts.insert(v.as_str().to_string(), e.clone());
                 pre_starts.push((v, e));
             }
             Some((x, e, false)) => starts.push((x, e)),
-            None => return Err(refuse("discretization", "an initial equation other than a state's or a pre-value's start of parameters (x = x0, pre(y) = y0): not exported as code; set the state's start, or initType = NoInit", eq.span)),
+            None => return Err(refuse("discretization", "an initial equation other than a state's or a pre-value's value (x = x0, pre(y) = y0, y = u): not exported as code, a steady state (der(x) = 0) neither; set initType = NoInit, InitialState or InitialOutput", eq.span)),
         }
     }
     m.initial_equations.clear();
@@ -486,10 +573,18 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     m.when_chains = kept;
 
     // the tick: each state's Euler step (or its reinit), each when's equations, the memories
+    let mut first_values: HashMap<VarName, Expression> = HashMap::new();
+    for (x, e) in first_tick {
+        let mut e = e;
+        observe(&mut e, &scope, &mut added)?;
+        first_values.insert(x, e);
+    }
     for x in &order {
         let n = x.as_str();
         let step = binary(OpBinary::Add, pre(var(n)), binary(OpBinary::Mul, literal(Literal::Real(period)), var(&format!("der.{n}"))));
-        let value = select(reinits.remove(x).unwrap_or_default(), step);
+        let mut branches: Vec<(Expression, Expression)> = first_values.remove(x).map(|e| (added.initial(), e)).into_iter().collect();
+        branches.extend(reinits.remove(x).unwrap_or_default());
+        let value = select(branches, step);
         added.assign(n, value, "a discretized state's Euler step");
     }
     for (target, branches) in on {
