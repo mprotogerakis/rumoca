@@ -636,6 +636,31 @@ impl Compiler {
         ))
     }
 
+    /// Compile Modelica source code discretized at `period` seconds for code run once a period
+    /// (`rumoca_phase_dae::discretize`: its states one explicit Euler step a period, its events
+    /// and its time seen at the ticks, as MLS §16.8.1 discretizes a clocked partition): a model of
+    /// continuous time through the targets of sampled models, the GALEC ones.
+    pub fn compile_str_discretized(
+        &self,
+        source: &str,
+        file_name: &str,
+        period: f64,
+    ) -> Result<CompilationResult, CompilerError> {
+        let compiled = self.compile_str(source, file_name)?;
+        let flat = rumoca_phase_dae::discretize::explicit_euler(&compiled.flat, period)
+            .map_err(|e| CompilerError::FlattenError(e.to_string()))?;
+        let source_map = compiled.resolved.inner().source_map.clone();
+        let (dae, balance_detail, _) = rumoca_phase_dae::to_dae_with_evidence(&flat, source_map)
+            .map_err(|e| CompilerError::FlattenError(format!("the model discretized: {e}")))?
+            .into_parts();
+        Ok(CompilationResult::new(
+            Arc::new(dae),
+            balance_detail,
+            flat,
+            compiled.resolved,
+        ))
+    }
+
     /// Parse Modelica source code into its syntax tree (SPEC_0007 Stage 1).
     ///
     /// In-memory counterpart to [`Self::parse_file`]: the session stores the

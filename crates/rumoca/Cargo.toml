@@ -76,6 +76,8 @@ heavy-solve-tests = []
 tracing = ["dep:tracing-subscriber", "rumoca-compile/tracing", "rumoca-sim/tracing"]
 
 [dependencies]
+# (the discretization of a continuous-time model for the GALEC targets: Compiler::compile_str_discretized)
+rumoca-phase-dae = { workspace = true }
 # Internal crates: CLI consumes high-level facades plus the phase-owned
 # ResolvedTree proof exposed by its library API.
 # rumoca-compile wraps all compilation phases.
