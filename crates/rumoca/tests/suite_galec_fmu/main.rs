@@ -37,3 +37,4 @@ mod cli_target_galec_production;
 mod container_xml_support;
 #[cfg(feature = "fmu-packaging")]
 mod metadata_support;
+mod galec_discretized;
