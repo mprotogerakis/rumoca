@@ -15,8 +15,11 @@ model Plant "a lag, a PI, an event, a start, the time"
   Real integral(start = 0);
   Real seen;
   discrete Real t0(start = 0);
+  output Boolean h "a hysteresis, as the MSL's";
+  parameter Boolean h0 = true;
 initial equation
   lag = x0;
+  pre(h) = h0;
 equation
   der(lag) = (y - lag)/T;
   der(integral) = w - lag;
@@ -29,6 +32,7 @@ equation
     t0 = time;
   end when;
   seen = if initial() then 0 else 1;
+  h = not pre(h) and y > 6 or pre(h) and y >= 4;
 end Plant;
 "#;
 
@@ -48,8 +52,10 @@ fn a_continuous_model_discretized_goes_through_the_galec_targets() {
                 "self.lag := 1.0;",
                 "self.'time.tick' := -0.1;",
                 "self.'time.tick' := self.'previous(time.tick)' + 0.1;",
-                "rumoca_clocked0_conditional_1 := self.'previous(trips)' + 1;",
+                ":= self.'previous(trips)' + 1;",
                 "self.'pre.when' := self.alarm;",
+                "self.'pre.of.h' := true;",
+                "self.'pre.of.h' := self.h;",
             ] {
                 assert!(alg.contains(want), "{want}\n{alg}");
             }
