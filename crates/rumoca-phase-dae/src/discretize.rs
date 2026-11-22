@@ -118,6 +118,34 @@ fn rewrite(e: &mut Expression, f: &mut dyn FnMut(&Expression) -> Result<Option<E
     Ok(())
 }
 
+/// `max` and `min` of an array literal (the MSL's `max([Td/Nd, 1.e-14])`) as nested calls of two:
+/// GALEC projects no reduction of a literal matrix.
+fn fold_reductions(e: &mut Expression) -> Result<(), ToDaeError> {
+    rewrite(e, &mut |node| {
+        let Expression::BuiltinCall { function: f @ (BuiltinFunction::Max | BuiltinFunction::Min), args, span } = node else { return Ok(None) };
+        let [Expression::Array { .. }] = args.as_slice() else { return Ok(None) };
+        fn leaves(e: &Expression, out: &mut Vec<Expression>) -> bool {
+            match e {
+                Expression::Array { elements, .. } => elements.iter().all(|x| leaves(x, out)),
+                Expression::Range { .. } | Expression::ArrayComprehension { .. } => false,
+                x => {
+                    out.push(x.clone());
+                    true
+                }
+            }
+        }
+        let mut items = vec![];
+        if !leaves(&args[0], &mut items) || items.is_empty() {
+            return Ok(None);
+        }
+        for x in &mut items {
+            fold_reductions(x)?;
+        }
+        let (f, span) = (*f, *span);
+        Ok(items.into_iter().reduce(|a, b| Expression::BuiltinCall { function: f, args: vec![a, b], span }))
+    })
+}
+
 /// What a discretization adds: its variables (name, kind, start) and the equations of its tick.
 #[derive(Default)]
 struct Added {
@@ -503,6 +531,15 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
         }
     }
 
+    // (reductions of literal arrays folded, in the equations and in bindings and starts too)
+    for v in m.variables.values_mut() {
+        for e in [&mut v.binding, &mut v.start].into_iter().flatten() {
+            fold_reductions(e)?;
+        }
+    }
+    for eq in &mut m.equations {
+        fold_reductions(&mut eq.residual)?;
+    }
     // the equations: as read at a tick
     let mut equations = std::mem::take(&mut m.equations);
     for eq in &mut equations {
