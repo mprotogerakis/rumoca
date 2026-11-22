@@ -794,14 +794,12 @@ pub(super) fn lower_builtin_arguments(
             ));
         }
     };
+    // (the Real `min`/`max` of mixed operands: each Integer operand coerced to Real; the
+    // Integer `imin`/`imax` take theirs as they are)
     let lowered = arguments
         .into_iter()
-        .map(|argument| match builtin {
-            dae::PureBuiltin::Min | dae::PureBuiltin::Max
-                if !matches!(argument.scalar_type, gast::ScalarType::Integer) =>
-            {
-                coerce(argument, gast::ScalarType::Real, span)
-            }
+        .map(|argument| match name {
+            "min" | "max" => coerce(argument, gast::ScalarType::Real, span),
             _ => Ok(argument.expression),
         })
         .collect::<Result<Vec<_>, GalecTargetError>>()?;
@@ -912,6 +910,27 @@ mod tests {
             )
             .expect("integer min/max lowers to the integer builtin");
             assert_eq!(called_name(&lowered), expected);
+        }
+    }
+
+    /// A Real `min`/`max` of an Integer and a Real (an Integer literal beside a Real:
+    /// `min(YMax, 0)`): the Integer operand coerced, `min(x, real(0))`, not left as an
+    /// Integer the checked block then refuses (EG017).
+    #[test]
+    fn mixed_min_max_coerce_their_integer_operand() {
+        let span = Span::DUMMY;
+        for builtin in [dae::PureBuiltin::Min, dae::PureBuiltin::Max] {
+            for operands in [[gast::ScalarType::Real, gast::ScalarType::Integer], [gast::ScalarType::Integer, gast::ScalarType::Real]] {
+                let lowered = lower_builtin_arguments(builtin, operands.iter().map(|t| typed(*t)).collect(), span)
+                    .expect("mixed min/max lowers");
+                assert!(matches!(called_name(&lowered).as_str(), "min" | "max"), "{builtin:?}");
+                for (argument, operand) in call_arguments(&lowered).iter().zip(operands) {
+                    match operand {
+                        gast::ScalarType::Integer => assert_eq!(called_name(argument), "real", "{builtin:?} {operands:?}"),
+                        _ => assert!(matches!(argument, gast::Expression::Integer(1)), "{builtin:?} {operands:?}: a Real left as it is"),
+                    }
+                }
+            }
         }
     }
 
