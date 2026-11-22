@@ -126,6 +126,9 @@ struct Added {
     taken: HashSet<String>,
     first: Option<String>,
     time: Option<String>,
+    /// a discrete variable's value before the first tick (an initial equation `pre(v) = e`, else
+    /// its start): its memory's start
+    pre_starts: HashMap<String, Expression>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -153,14 +156,15 @@ impl Added {
         self.tick.push(flat::WhenEquation::Assign { target: VarName::new(target), value, span: at(), origin: origin.to_string() });
     }
 
-    /// A memory of `value` (its kind), set at each tick: its name.
-    fn memory(&mut self, what: &str, kind: Kind, value: Expression) -> String {
+    /// A memory of `value` (its kind; its value before the first tick, else 0 or false), set at
+    /// each tick: its name.
+    fn memory(&mut self, what: &str, kind: Kind, value: Expression, before: Option<Expression>) -> String {
         let name = self.fresh(&format!("pre.{what}"));
-        let start = match kind {
+        let start = before.unwrap_or_else(|| match kind {
             Kind::Real => literal(Literal::Real(0.0)),
             Kind::Integer => literal(Literal::Integer(0)),
             Kind::Boolean => literal(Literal::Boolean(false)),
-        };
+        });
         self.vars.push((name.clone(), kind, start));
         self.assign(&name, value, "the memory of a discretized model's event");
         name
@@ -237,7 +241,7 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
                 let [b] = args.as_slice() else { return Err(refuse("discretization", "edge() of one argument", *span)) };
                 let mut b = b.clone();
                 observe(&mut b, scope, added)?;
-                let m = added.memory("edge", Kind::Boolean, b.clone());
+                let m = added.memory("edge", Kind::Boolean, b.clone(), None);
                 Some(binary(OpBinary::And, b, not(pre(var(&m)))))
             }
             Expression::BuiltinCall { function: BuiltinFunction::Change, args, span } => {
@@ -249,7 +253,7 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
                 .ok_or_else(|| refuse("discretization", "change() of a scalar variable only", *span))?;
                 let mut v = v.clone();
                 observe(&mut v, scope, added)?;
-                let m = added.memory("change", kind, v.clone());
+                let m = added.memory("change", kind, v.clone(), None);
                 Some(binary(OpBinary::Neq, v, pre(var(&m))))
             }
             // (pre of what no `when` sets, a Boolean an equation defines: against its memory)
@@ -257,7 +261,8 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
                 [Expression::VarRef { name, subscripts, .. }] if subscripts.is_empty() && !scope.when_set.contains(name.var_name().as_str()) && !scope.states.contains(name.var_name()) => {
                     let n = name.var_name().as_str();
                     let kind = scope.kinds.get(n).copied().ok_or_else(|| refuse("discretization", format!("pre() of {n}"), *span))?;
-                    let m = added.memory(&format!("of.{n}"), kind, var(n));
+                    let before = added.pre_starts.get(n).cloned();
+                    let m = added.memory(&format!("of.{n}"), kind, var(n), before);
                     Some(pre(var(&m)))
                 }
                 _ => None,
@@ -308,8 +313,10 @@ fn rose(c: &Expression, scope: &Scope, added: &mut Added) -> Result<Expression, 
             _ => {
                 let mut b = el.clone();
                 observe(&mut b, scope, added)?;
-                let m = added.memory("when", Kind::Boolean, b.clone());
-                terms.push(binary(OpBinary::And, b, not(pre(var(&m)))));
+                // (a condition true from the start no rise: as a when, which only a change fires)
+                let m = added.memory("when", Kind::Boolean, b.clone(), None);
+                let first = added.initial();
+                terms.push(binary(OpBinary::And, binary(OpBinary::And, b, not(pre(var(&m)))), not(first)));
             }
         }
     }
@@ -372,23 +379,37 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
         refs.iter().all(|n| m.variables.get(n).is_some_and(|v| matches!(v.variability, Variability::Parameter(_) | Variability::Constant(_))))
     };
     let mut starts: Vec<(VarName, Expression)> = vec![];
+    let mut pre_starts: Vec<(VarName, Expression)> = vec![];
     for eq in &m.initial_equations {
+        let pre_of = |e: &Expression| match e {
+            Expression::BuiltinCall { function: BuiltinFunction::Pre, args, .. } => match args.as_slice() {
+                [Expression::VarRef { name, subscripts, .. }] if subscripts.is_empty() => Some(name.var_name().clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         let found = match &eq.residual {
             Expression::Binary { op: OpBinary::Sub, lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
                 (Expression::VarRef { name, subscripts, .. }, e) | (e, Expression::VarRef { name, subscripts, .. })
-                    if subscripts.is_empty() && states.contains(name.var_name()) && fixed_only(e) => Some((name.var_name().clone(), e.clone())),
+                    if subscripts.is_empty() && states.contains(name.var_name()) && fixed_only(e) => Some((name.var_name().clone(), e.clone(), false)),
+                (p, e) | (e, p) if pre_of(p).is_some() && fixed_only(e) => Some((pre_of(p).unwrap(), e.clone(), true)),
                 _ => None,
             },
             _ => None,
         };
         match found {
-            Some(s) => starts.push(s),
-            None => return Err(refuse("discretization", "an initial equation other than a state's start of parameters (x = x0): not exported as code; set the state's start, or initType = NoInit", eq.span)),
+            Some((v, e, true)) => {
+                added.pre_starts.insert(v.as_str().to_string(), e.clone());
+                pre_starts.push((v, e));
+            }
+            Some((x, e, false)) => starts.push((x, e)),
+            None => return Err(refuse("discretization", "an initial equation other than a state's or a pre-value's start of parameters (x = x0, pre(y) = y0): not exported as code; set the state's start, or initType = NoInit", eq.span)),
         }
     }
     m.initial_equations.clear();
     m.initial_structured_equations.clear();
-    for (x, e) in starts {
+    // (a state's start; a when-set variable's pre-value its start too, its value before the first tick)
+    for (x, e) in starts.into_iter().chain(pre_starts.into_iter().filter(|(v, _)| when_set.contains(v.as_str()))) {
         if let Some(v) = m.variables.get_mut(&x) {
             v.start = Some(e);
             v.fixed = Some(vec![true]);
