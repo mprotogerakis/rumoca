@@ -17,7 +17,10 @@ model Plant "a lag, a PI, an event, a start, the time"
   discrete Real t0(start = 0);
   output Boolean h "a hysteresis, as the MSL's";
   parameter Boolean h0 = true;
+  Real ramp "from its input at the start";
+  output Real late "the input 0.3 s ago";
 initial equation
+  ramp = w;
   lag = x0;
   pre(h) = h0;
 equation
@@ -33,6 +36,8 @@ equation
   end when;
   seen = if initial() then 0 else 1;
   h = not pre(h) and y > 6 or pre(h) and y >= 4;
+  der(ramp) = 0.5;
+  late = delay(w, 0.3);
 end Plant;
 "#;
 
@@ -44,6 +49,9 @@ fn a_continuous_model_discretized_goes_through_the_galec_targets() {
         assert!(!files.is_empty(), "{target}");
         if target == "galec" {
             let alg = &files.iter().find(|f| f.path.ends_with(".alg")).unwrap().content;
+            if std::env::var_os("SHOW_ALG").is_some() {
+                println!("{alg}");
+            }
             // (each state one Euler step from its value at the tick's start; its start of parameters
             // from its initial equation; the events as rises since the last tick; time 0 at the first)
             for want in [
@@ -56,6 +64,9 @@ fn a_continuous_model_discretized_goes_through_the_galec_targets() {
                 "self.'pre.when' := self.alarm;",
                 "self.'pre.of.h' := true;",
                 "self.'pre.of.h' := self.h;",
+                "self.'pre.delayed' := ",
+                "self.'pre.delay3'",
+                "self.late := self.'pre.delayed';",
             ] {
                 assert!(alg.contains(want), "{want}\n{alg}");
             }
