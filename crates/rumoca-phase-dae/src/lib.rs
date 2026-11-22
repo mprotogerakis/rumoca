@@ -7,6 +7,7 @@
 
 pub mod balance;
 mod construction;
+pub mod discretize;
 mod errors;
 
 use rumoca_core::SourceMap;
