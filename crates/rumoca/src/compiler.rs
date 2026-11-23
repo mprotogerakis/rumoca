@@ -45,8 +45,8 @@ use rumoca_compile::codegen::{
     render_dae_template_with_name, render_flat_template_with_name,
 };
 use rumoca_compile::compile::{
-    Dae, DaeCompilationResult as CompileDaeCompilationResult, FlatModel, SemanticDiagnosticsMode,
-    Session, SessionConfig, SourceRootKind, VariableRole,
+    Dae, DaeCompilationResult as CompileDaeCompilationResult, FlatModel, ModelDiagnostics,
+    SemanticDiagnosticsMode, Session, SessionConfig, SourceRootKind, VariableRole,
 };
 use rumoca_compile::parsing::{StoredDefinition, collect_compile_unit_source_files};
 use rumoca_compile::source_roots::{
@@ -611,6 +611,26 @@ impl Compiler {
             CompilationResult::new(result.dae, result.balance_detail, result.flat, resolved);
         compiled.warnings = warnings;
         Ok(compiled)
+    }
+
+    /// The editor's diagnostics of `source`'s model in a session the caller keeps (its source
+    /// roots loaded once, as [`Self::compile_str_in`] loads them): names that resolve nowhere,
+    /// types that do not fit, at their places. Lenient where a compile is strict, so the
+    /// libraries' own documents may have some too; it builds no DAE when the body has errors, a
+    /// fraction of a compile's time.
+    pub fn diagnostics_in(
+        &self,
+        session: &mut Session,
+        source: &str,
+        file_name: &str,
+    ) -> Result<ModelDiagnostics, CompilerError> {
+        let model_name = self
+            .model_name
+            .as_ref()
+            .ok_or(CompilerError::NoModelSpecified)?;
+        self.load_required_source_roots(session, source)?;
+        self.load_local_compile_unit(session, source, file_name)?;
+        Ok(session.semantic_diagnostics_query(model_name, SemanticDiagnosticsMode::Standard))
     }
 
     /// Compile Modelica source code discretized at `period` seconds for code run once a period
@@ -1326,6 +1346,36 @@ mod tests {
             warnings[0].contains("parameter useB cannot be set")
                 && warnings[0].contains("GuardKinds.mo:11"),
             "{warnings:?}"
+        );
+    }
+
+    /// The editor's diagnostics in a kept session: a name that resolves nowhere, where it is.
+    #[test]
+    fn diagnostics_in_a_kept_session_place_an_unknown_name() {
+        let mut session = Session::new(SessionConfig::default());
+        let compiler = Compiler::new().model("M");
+        let bad = "model M\n  Real x;\nequation\n  der(x) = -nowhere;\nend M;\n";
+        let d = compiler
+            .diagnostics_in(&mut session, bad, "M.mo")
+            .expect("diagnosed");
+        let at = d
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, DiagnosticSeverity::Error))
+            .filter_map(|d| d.labels.first())
+            .map(|l| &bad[l.span.start.0..l.span.end.0])
+            .collect::<Vec<_>>();
+        assert!(at.contains(&"nowhere"), "{:?}", d.diagnostics);
+        let good = bad.replace("-nowhere", "-x");
+        let d = compiler
+            .diagnostics_in(&mut session, &good, "M.mo")
+            .expect("diagnosed");
+        assert!(
+            d.diagnostics
+                .iter()
+                .all(|d| !matches!(d.severity, DiagnosticSeverity::Error)),
+            "{:?}",
+            d.diagnostics
         );
     }
 
