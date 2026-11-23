@@ -53,7 +53,7 @@ use rumoca_compile::source_roots::{
     PackageLayoutError, canonical_path_key, parse_source_root_with_cache,
     render_source_root_status_message, resolve_source_root_cache_dir, source_root_source_set_key,
 };
-use rumoca_core::DiagnosticSeverity;
+use rumoca_core::{Diagnostic, DiagnosticSeverity};
 use rumoca_phase_resolve::ResolvedTree;
 use rumoca_sim::{lower_solve_artifacts, lower_solve_package, lower_solve_problem};
 
@@ -73,6 +73,9 @@ pub struct CompilationResult {
     pub flat: FlatModel,
     /// The resolved tree (intermediate, before instantiation and typechecking).
     pub resolved: ResolvedTree,
+    /// The warnings the compile reported (printed too): for a caller that shows them where the
+    /// code is, by their labels' spans.
+    pub warnings: Vec<Diagnostic>,
     /// Cached solve-template renderer (scalarized DAE + lowered solve
     /// problem, as typed template values). Building it dominates target
     /// generation on large models and a multi-file target renders several
@@ -172,6 +175,7 @@ impl CompilationResult {
             balance_detail,
             flat,
             resolved,
+            warnings: Vec::new(),
             solve_template_renderer: std::sync::OnceLock::new(),
             solve_template_renderer_without_dae: std::sync::OnceLock::new(),
         }
@@ -571,7 +575,7 @@ impl Compiler {
             }
         })?;
         let (result, resolved) = compilation.into_parts();
-        report_compile_warnings(&mut session, model_name);
+        let warnings = report_compile_warnings(&mut session, model_name);
 
         if self.verbose {
             eprintln!("[rumoca] Compilation complete.");
@@ -586,12 +590,10 @@ impl Compiler {
             eprintln!("[rumoca]   Balance: {}", result.balance_detail.balance());
         }
 
-        Ok(CompilationResult::new(
-            result.dae,
-            result.balance_detail,
-            result.flat,
-            resolved,
-        ))
+        let mut compiled =
+            CompilationResult::new(result.dae, result.balance_detail, result.flat, resolved);
+        compiled.warnings = warnings;
+        Ok(compiled)
     }
 
     /// Compile Modelica source code discretized at `period` seconds for code run once a period
@@ -611,12 +613,10 @@ impl Compiler {
         let (dae, balance_detail, _) = rumoca_phase_dae::to_dae_with_evidence(&flat, source_map)
             .map_err(|e| CompilerError::FlattenError(format!("the model discretized: {e}")))?
             .into_parts();
-        Ok(CompilationResult::new(
-            Arc::new(dae),
-            balance_detail,
-            flat,
-            compiled.resolved,
-        ))
+        let mut discretized =
+            CompilationResult::new(Arc::new(dae), balance_detail, flat, compiled.resolved);
+        discretized.warnings = compiled.warnings;
+        Ok(discretized)
     }
 
     /// Parse Modelica source code into its syntax tree (SPEC_0007 Stage 1).
@@ -785,7 +785,7 @@ fn loaded_source_root_document_uri(
     (file_text == source).then_some(uri)
 }
 
-/// Print every warning-severity diagnostic the compiled model carries.
+/// Print every warning-severity diagnostic the compiled model carries, and return them.
 ///
 /// A compile that succeeds still has things the language requires a tool to
 /// say: MLS 3.7 §12.3 deprecates an external function that declares no
@@ -803,14 +803,16 @@ fn loaded_source_root_document_uri(
 /// after `compile_model_strict`, whose cached stage queries the report reads.
 /// After the uncached strict flat compile the report builds those stages once
 /// more.
-fn report_compile_warnings(session: &mut Session, model_name: &str) {
+fn report_compile_warnings(session: &mut Session, model_name: &str) -> Vec<Diagnostic> {
     let diagnostics = session.semantic_diagnostics_query(model_name, SemanticDiagnosticsMode::Save);
     let source_map = diagnostics.source_map;
-    for diagnostic in diagnostics
+    let warnings: Vec<Diagnostic> = diagnostics
         .diagnostics
         .iter()
         .filter(|diagnostic| matches!(diagnostic.severity, DiagnosticSeverity::Warning))
-    {
+        .cloned()
+        .collect();
+    for diagnostic in &warnings {
         let code = diagnostic.code.as_deref().unwrap_or("warning");
         match source_map
             .as_ref()
@@ -831,6 +833,7 @@ fn report_compile_warnings(session: &mut Session, model_name: &str) {
             None => eprintln!("[rumoca] warning[{code}]: {}", diagnostic.message),
         }
     }
+    warnings
 }
 
 #[cfg(test)]
@@ -1306,6 +1309,31 @@ mod tests {
             warnings[0].contains("parameter useB cannot be set")
                 && warnings[0].contains("GuardKinds.mo:11"),
             "{warnings:?}"
+        );
+    }
+
+    /// A compile that succeeds hands its warnings to the caller too, with the labels that place
+    /// them: an editor shows them where the code is, not only on standard error.
+    #[test]
+    fn a_compile_returns_its_warnings() {
+        let source = "model GuardKinds\n  parameter Boolean useB = true;\n  \
+                      Real x(start = 1, fixed = true);\n  Real b;\n  Real z;\nequation\n  \
+                      der(x) = -x;\n  b = 2 * x;\n  z = if useB then x else b;\nend GuardKinds;\n";
+        let compiled = Compiler::new()
+            .model("GuardKinds")
+            .compile_str(source, "GuardKinds.mo")
+            .expect("compiles");
+        let wd001: Vec<_> = compiled
+            .warnings
+            .iter()
+            .filter(|w| w.code.as_deref() == Some("WD001"))
+            .collect();
+        assert_eq!(wd001.len(), 1, "{:?}", compiled.warnings);
+        let label = wd001[0].labels.first().expect("a label");
+        assert!(
+            source[label.span.start.0..label.span.end.0].contains("useB"),
+            "{:?}",
+            &source[label.span.start.0..label.span.end.0]
         );
     }
 
