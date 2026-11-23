@@ -71,7 +71,7 @@ pub(crate) mod targets_cmd;
 pub use compiler::{CompilationResult, Compiler, DaeCompilationResult, TemplateIr};
 pub use error::CompilerError;
 /// The session [`Compiler::compile_str_in`] compiles in, kept by its caller.
-pub use rumoca_compile::compile::{Session, SessionConfig};
+pub use rumoca_compile::compile::{SemanticDiagnosticsMode, Session, SessionConfig};
 // In-memory twin of `compile --target`; public so template-target CI renders
 // through the exact CLI path (capability gates + name-dispatched renderers).
 pub use target_manifest::render_target_files;

@@ -157,6 +157,14 @@ pub(crate) fn source_root_cache_compiler_version() -> Result<String> {
 }
 
 fn source_root_cache_compiler_version_uncached() -> Result<String> {
+    // A key the build gives (an embedding application's: the compiler's revision), so that a new
+    // build of the application with the same compiler finds the cache its last one wrote.
+    if let Some(key) = option_env!("RUMOCA_CACHE_KEY").filter(|key| !key.is_empty()) {
+        return Ok(format!(
+            "rumoca-compile/{}/key:{key}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
     if let Some(source_fingerprint) = compiler_source_fingerprint() {
         return Ok(format!(
             "rumoca-compile/{}/src:{}",
