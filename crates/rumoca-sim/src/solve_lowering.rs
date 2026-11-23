@@ -29,6 +29,7 @@ pub use diagnostics::{
 };
 pub use entry::{
     lower_dae_for_gpu_preparation, lower_dae_for_native_preparation, lower_dae_for_simulation,
+    take_warnings,
 };
 #[cfg(all(
     target_arch = "wasm32",
