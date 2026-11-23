@@ -594,14 +594,31 @@ impl Compiler {
         }
 
         let mut session = Session::new(self.session_config());
-        self.load_required_source_roots(&mut session, source)?;
+        self.compile_str_in(&mut session, source, file_name)
+    }
+
+    /// [`Self::compile_str`] in a session the caller keeps for the next compile: its source roots
+    /// are loaded once, and what the session has worked out about their classes serves again (an
+    /// editor that checks a model after each edit). The model's own document is `file_name`'s,
+    /// replaced each time.
+    pub fn compile_str_in(
+        &self,
+        session: &mut Session,
+        source: &str,
+        file_name: &str,
+    ) -> Result<CompilationResult, CompilerError> {
+        let model_name = self
+            .model_name
+            .as_ref()
+            .ok_or(CompilerError::NoModelSpecified)?;
+        self.load_required_source_roots(session, source)?;
 
         if self.verbose {
             eprintln!("[rumoca] Phase 1-2: Parsing and resolving...");
         }
-        self.load_local_compile_unit(&mut session, source, file_name)?;
+        self.load_local_compile_unit(session, source, file_name)?;
         // A sibling file may be the only one referring to a source root.
-        self.load_required_source_roots(&mut session, source)?;
+        self.load_required_source_roots(session, source)?;
 
         if self.verbose {
             eprintln!(
@@ -617,7 +634,7 @@ impl Compiler {
             }
         })?;
         let (result, resolved) = compilation.into_parts();
-        let warnings = report_compile_warnings(&mut session, model_name);
+        let warnings = report_compile_warnings(session, model_name);
 
         if self.verbose {
             eprintln!("[rumoca] Compilation complete.");
@@ -1388,6 +1405,34 @@ mod tests {
         assert_eq!(compile(by_value, true), (1, 0));
         let by_derivative = "der(a) = -q;\n  else\n    a = q - 1;";
         assert_eq!(compile(by_derivative, true), (0, 1));
+    }
+
+    /// A session kept for the next compile compiles the model's new text, not the old one's: an
+    /// editor's check after each edit, the libraries loaded once. It can go to another thread.
+    #[test]
+    fn a_kept_session_compiles_the_new_text() {
+        fn sent<T: Send>(_: &T) {}
+        let mut session = Session::new(SessionConfig::default());
+        sent(&session);
+        let compiler = Compiler::new().model("M");
+        let one = "model M\n  Real x(start = 1, fixed = true);\nequation\n  der(x) = -x;\nend M;\n";
+        let two = "model M\n  Real x(start = 1, fixed = true);\n  Real y;\nequation\n  der(x) = -x;\n  y = 2 * x;\nend M;\n";
+        let a = compiler
+            .compile_str_in(&mut session, one, "M.mo")
+            .expect("one compiles");
+        let b = compiler
+            .compile_str_in(&mut session, two, "M.mo")
+            .expect("two compiles");
+        assert_eq!(
+            (a.balance_detail.unknowns(), b.balance_detail.unknowns()),
+            (1, 2)
+        );
+        let bad = "model M\n  Real x;\nequation\n  der(x) = -y;\nend M;\n";
+        assert!(compiler.compile_str_in(&mut session, bad, "M.mo").is_err());
+        let again = compiler
+            .compile_str_in(&mut session, one, "M.mo")
+            .expect("one again");
+        assert_eq!(again.balance_detail.unknowns(), 1);
     }
 
     /// A compile that succeeds hands its warnings to the caller too, with the labels that place
