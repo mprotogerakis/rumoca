@@ -174,7 +174,7 @@ pub use solve_lowering::{
     lower_for_differentiation_with_overrides, lower_for_simulation_with_overrides,
     parameter_jacobian_for_dae, state_and_parameter_jacobian_for_dae,
     steady_state_adjoint_objective_gradient_for_dae, steady_state_objective_gradient_for_dae,
-    steady_state_parameter_sensitivity_for_dae, structural_report_for_dae,
+    steady_state_parameter_sensitivity_for_dae, structural_report_for_dae, take_warnings,
 };
 pub use solve_lowering::{
     ExcludedParameter, ExclusionReason, Linearization, LinearizationRequest,
