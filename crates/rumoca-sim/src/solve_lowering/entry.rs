@@ -199,8 +199,26 @@ fn lower_correlated_with_input_policy<'source>(
 /// `noEvent` switches fails with a typed fold error where its branch ends.
 pub(super) fn report_unlocalizable_guards(guards: &[solve::UnlocalizableGuard]) {
     for guard in guards {
-        eprintln!("warning[ES016]: {}", guard.warning());
+        warn(format!("warning[ES016]: {}", guard.warning()));
     }
+}
+
+thread_local! {
+    /// The warnings the lowering printed on this thread since the last [`take_warnings`].
+    static WARNINGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A warning of the lowering: printed, and kept for [`take_warnings`].
+fn warn(line: String) {
+    eprintln!("{line}");
+    WARNINGS.with(|w| w.borrow_mut().push(line));
+}
+
+/// The warnings the lowering printed on this thread since the last call (`warning[ES016]: …`),
+/// taken: for a caller that builds a simulation and shows what it was warned of, not only on
+/// standard error.
+pub fn take_warnings() -> Vec<String> {
+    WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
 /// Warn, before any integration, about every `StateSelect.prefer` request
@@ -211,11 +229,11 @@ fn report_withheld_state_preferences(
     withheld: &[rumoca_phase_structural::WithheldPreference],
 ) {
     for request in withheld {
-        eprintln!(
+        warn(format!(
             "warning[{}]: a StateSelect.prefer request is not honored, so other states are integrated and their start values apply: {}",
             rumoca_phase_structural::diagnostic_codes::ES017_WITHHELD_STATE_PREFERENCE,
             request.message(model)
-        );
+        ));
     }
 }
 
@@ -232,5 +250,21 @@ pub(super) fn model_lowering_error(
         rumoca_phase_solve::SolveModelLoweringError::InvalidOverride { message } => {
             SimulationDiagnosticError::InvalidOverride { message }
         }
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::{take_warnings, warn};
+
+    /// A warning is kept for the caller of its thread, and taken once.
+    #[test]
+    fn a_warning_is_taken_once_on_its_thread() {
+        warn("warning[ES016]: a block".into());
+        std::thread::spawn(|| assert!(take_warnings().is_empty(), "another thread's"))
+            .join()
+            .unwrap();
+        assert_eq!(take_warnings(), ["warning[ES016]: a block"]);
+        assert!(take_warnings().is_empty());
     }
 }
