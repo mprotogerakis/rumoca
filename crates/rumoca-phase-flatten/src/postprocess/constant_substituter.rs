@@ -828,8 +828,8 @@ pub(super) fn substitute_exposed_constants_expr(
 /// of its own; MLS §12.6 gives the member the value of the matching field of
 /// the record constant's binding. The record is found through the package slot
 /// that exposes it, or as the innermost referenced component that is a
-/// constant: through the function's exposing packages first (MLS §7.3), then
-/// by its declaration.
+/// constant: as its instance's package binds it (MLS §7.2), then through the
+/// function's exposing packages (MLS §7.3), then by its declaration.
 fn record_member_source_constant(
     name: &rumoca_core::Reference,
     span: rumoca_core::Span,
@@ -849,6 +849,15 @@ fn record_member_source_constant(
     }
     for root in (0..parts.len().saturating_sub(1)).rev() {
         let declaration = parts[root].def_id;
+        // MLS §7.2: the record of this instance first, as an extends
+        // modification of its package binds it (`extends Base(data = …)`):
+        // two packages of one base share the declaration, not its value.
+        let instance_record = parts[..=root]
+            .iter()
+            .map(|part| part.ident.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        let modified = modified_constant_value(&instance_record, env).map(|(_, value)| value);
         let exposed = super::function_exposures::exposed_constant_value(
             env.ctx,
             env.exposures,
@@ -856,7 +865,9 @@ fn record_member_source_constant(
             name.as_str(),
             span,
         )?;
-        let Some(record) = exposed.or_else(|| env.ctx.constant_values_by_def_id.get(&declaration))
+        let Some(record) = modified
+            .or(exposed)
+            .or_else(|| env.ctx.constant_values_by_def_id.get(&declaration))
         else {
             continue;
         };
