@@ -23,7 +23,21 @@ pub struct SolveStopSchedule {
 struct StopEvent {
     time: f64,
     pre_mode: EventPreMode,
+    /// A scheduled time event is among the events of this instant.
+    time_relation: bool,
     terminal: bool,
+}
+
+impl StopEvent {
+    fn runtime_stop(self) -> RuntimeEventStop {
+        RuntimeEventStop {
+            pre_mode: self.pre_mode,
+            observe_right_limit: self.pre_mode == EventPreMode::FollowCurrent,
+            relation_right_limit: self.time_relation
+                && self.pre_mode != EventPreMode::FollowCurrent,
+            terminal: self.terminal,
+        }
+    }
 }
 
 impl SolveStopSchedule {
@@ -59,6 +73,7 @@ impl SolveStopSchedule {
                 StopEvent {
                     time,
                     pre_mode: EventPreMode::EventEntry,
+                    time_relation: false,
                     terminal: false,
                 },
             );
@@ -66,11 +81,7 @@ impl SolveStopSchedule {
         if let Some(event) = next {
             return (
                 event.time,
-                Some(RuntimeEventStop {
-                    pre_mode: event.pre_mode,
-                    observe_right_limit: event.pre_mode == EventPreMode::FollowCurrent,
-                    terminal: event.terminal,
-                }),
+                Some(event.runtime_stop()),
             );
         }
         (t_target, None)
@@ -135,6 +146,7 @@ impl SolveStopSchedule {
                     StopEvent {
                         time: tick_time,
                         pre_mode: EventPreMode::EventEntry,
+                        time_relation: false,
                         terminal: false,
                     },
                 );
@@ -142,11 +154,7 @@ impl SolveStopSchedule {
         }
         found.map(|event| CoincidentScheduledEvent {
             time: event.time,
-            event: RuntimeEventStop {
-                pre_mode: event.pre_mode,
-                observe_right_limit: event.pre_mode == EventPreMode::FollowCurrent,
-                terminal: event.terminal,
-            },
+            event: event.runtime_stop(),
         })
     }
 
@@ -190,6 +198,7 @@ impl StopEvent {
     fn bit_eq(&self, other: &Self) -> bool {
         self.time.to_bits() == other.time.to_bits()
             && self.pre_mode == other.pre_mode
+            && self.time_relation == other.time_relation
             && self.terminal == other.terminal
     }
 }
@@ -198,6 +207,13 @@ impl StopEvent {
 pub struct RuntimeEventStop {
     pub pre_mode: EventPreMode,
     pub observe_right_limit: bool,
+    /// A scheduled time event shares the instant with an event that is
+    /// entered at the instant itself (a clock's tick). The tick's event runs
+    /// at the instant; the time relation that crosses there (`time > c`) is
+    /// false at the instant and is read past it afterwards, an event of its
+    /// own at the same instant (MLS 3.7 §8.5). Without this the relation
+    /// keeps the instant's value until the next event of any kind.
+    pub relation_right_limit: bool,
     pub terminal: bool,
 }
 
@@ -206,6 +222,7 @@ impl RuntimeEventStop {
         Self {
             pre_mode,
             observe_right_limit: pre_mode == EventPreMode::FollowCurrent,
+            relation_right_limit: false,
             terminal: false,
         }
     }
@@ -214,6 +231,7 @@ impl RuntimeEventStop {
         Self {
             pre_mode: EventPreMode::FollowCurrent,
             observe_right_limit: true,
+            relation_right_limit: false,
             terminal: false,
         }
     }
@@ -226,6 +244,7 @@ impl RuntimeEventStop {
         Self {
             pre_mode: self.pre_mode.merge(other.pre_mode),
             observe_right_limit: self.observe_right_limit || other.observe_right_limit,
+            relation_right_limit: self.relation_right_limit || other.relation_right_limit,
             terminal: self.terminal || other.terminal,
         }
     }
@@ -330,9 +349,14 @@ fn merge_coincident_event(
 ) {
     match found {
         Some(existing) => {
+            let time_relation = existing.event.relation_right_limit
+                || existing.event.pre_mode == EventPreMode::FollowCurrent
+                || pre_mode == EventPreMode::FollowCurrent;
             existing.event.pre_mode = existing.event.pre_mode.merge(pre_mode);
             existing.event.observe_right_limit =
                 existing.event.pre_mode == EventPreMode::FollowCurrent;
+            existing.event.relation_right_limit =
+                time_relation && existing.event.pre_mode != EventPreMode::FollowCurrent;
         }
         None => {
             *found = Some(CoincidentScheduledEvent {
@@ -372,6 +396,7 @@ fn collect_static_ode_events(
         .map(|time| StopEvent {
             time,
             pre_mode: EventPreMode::FollowCurrent,
+            time_relation: true,
             terminal: false,
         })
         .collect();
@@ -379,6 +404,7 @@ fn collect_static_ode_events(
         events.push(StopEvent {
             time: t_end,
             pre_mode: EventPreMode::EventEntry,
+            time_relation: false,
             terminal: true,
         });
     }
@@ -393,6 +419,7 @@ fn merge_next_stop(next: &mut Option<StopEvent>, candidate: StopEvent) {
     match next {
         Some(event) if sample_time_match_with_tol(event.time, candidate.time) => {
             event.pre_mode = event.pre_mode.merge(candidate.pre_mode);
+            event.time_relation |= candidate.time_relation;
             event.terminal |= candidate.terminal;
         }
         Some(event) if event.time < candidate.time => {}
@@ -404,6 +431,7 @@ fn merge_coincident_stop(found: &mut Option<StopEvent>, candidate: StopEvent) {
     match found {
         Some(event) => {
             event.pre_mode = event.pre_mode.merge(candidate.pre_mode);
+            event.time_relation |= candidate.time_relation;
             event.terminal |= candidate.terminal;
         }
         None => *found = Some(candidate),
@@ -418,6 +446,7 @@ fn merge_stop_events(mut events: Vec<StopEvent>) -> Vec<StopEvent> {
             && sample_time_match_with_tol(last.time, event.time)
         {
             last.pre_mode = last.pre_mode.merge(event.pre_mode);
+            last.time_relation |= event.time_relation;
             last.terminal |= event.terminal;
             continue;
         }
@@ -554,9 +583,14 @@ mod tests {
         let (stop, mode) = schedule.next_stop(0.0, 1.0);
 
         assert!(sample_time_match_with_tol(stop, 0.1));
+        // The tick's pre mode, and the scheduled time event's relation still
+        // to be read past the instant.
         assert_eq!(
             mode,
-            Some(RuntimeEventStop::static_event(EventPreMode::EventEntry))
+            Some(RuntimeEventStop {
+                relation_right_limit: true,
+                ..RuntimeEventStop::static_event(EventPreMode::EventEntry)
+            })
         );
     }
 
@@ -669,6 +703,7 @@ mod tests {
             Some(RuntimeEventStop {
                 pre_mode: EventPreMode::EventEntry,
                 observe_right_limit: false,
+                relation_right_limit: false,
                 terminal: true,
             })
         );

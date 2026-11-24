@@ -358,6 +358,7 @@ mod tests {
             Some(RuntimeEventStop {
                 pre_mode: super::super::solve_ops::EventPreMode::EventEntry,
                 observe_right_limit: true,
+                relation_right_limit: false,
                 terminal: false,
             })
         );

@@ -18,6 +18,8 @@ pub(super) struct EventBoundaryOutcome {
 
 pub(super) fn event_boundary_horizon(event: RuntimeEventStop, target: f64, horizon: f64) -> f64 {
     match (event.pre_mode, event.observe_right_limit) {
+        // (a time relation crossing at this instant is read past it: as far as a time event's)
+        (EventPreMode::EventEntry | EventPreMode::Fixed, _) if event.relation_right_limit => horizon,
         (EventPreMode::EventEntry | EventPreMode::Fixed, _) => target,
         (EventPreMode::FollowCurrent, true) => horizon,
         (EventPreMode::FollowCurrent, false) => target,
@@ -39,10 +41,21 @@ impl SolveMeKernel {
         {
             self.apply_event_right_limit(event_time, right_time, event)?;
             Some(right_time)
+        } else if event.relation_right_limit && right_time > event_time {
+            // The instant's own event is done: the clock ticked at the instant.
+            // A scheduled time event shares it; its relation (`time > c`) is
+            // false at the instant itself and is read past it now, as that
+            // event alone would be (MLS 3.7 §8.5: every event of an instant).
+            self.apply_event_right_limit(
+                event_time,
+                right_time,
+                RuntimeEventStop::static_event(EventPreMode::FollowCurrent),
+            )?;
+            Some(right_time)
         } else {
             None
         };
-        let final_t = if event.observe_right_limit {
+        let final_t = if event.observe_right_limit || right_limit_t.is_some() {
             right_time
         } else {
             event_time
