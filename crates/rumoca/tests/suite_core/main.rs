@@ -389,6 +389,7 @@ mod terminate_when_regression;
 mod text_record_fields;
 mod tiered_models;
 mod time_event_when_activation;
+mod time_relation_at_a_sample_instant;
 mod top_level_package_constant_dimensions;
 mod torn_square_root_characteristic;
 mod trajectory_adjoint_tensor_test;
