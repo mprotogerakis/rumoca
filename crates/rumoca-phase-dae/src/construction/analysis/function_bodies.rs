@@ -296,11 +296,14 @@ fn validate_statement_function(
 fn branch_partial_read(detail: &str) -> Option<VarName> {
     if let Some((_, rest)) = detail.split_once("` reads `") {
         let (name, rest) = rest.split_once('`')?;
-        return rest.starts_with(", which only some branches").then(|| VarName::new(name));
+        return rest
+            .starts_with(", which only some branches")
+            .then(|| VarName::new(name));
     }
     let (_, rest) = detail.split_once("` returns `")?;
     let (name, rest) = rest.split_once('`')?;
-    rest.starts_with(" without defining").then(|| VarName::new(name))
+    rest.starts_with(" without defining")
+        .then(|| VarName::new(name))
 }
 
 /// The seed of `name`: its own, or its field's in the seed of the record it
@@ -311,21 +314,24 @@ fn predefined_seed(
     context: FunctionValidationContext<'_>,
     span: Span,
 ) -> Option<FunctionValueSeed> {
-    definitions.whole_loop_seed(name, context, span).ok().or_else(|| {
-        let (parent, field) = name.as_str().rsplit_once("__")?;
-        match definitions
-            .whole_loop_seed(&VarName::new(parent), context, span)
-            .ok()?
-        {
-            FunctionValueSeed::Record {
-                dimensions, fields, ..
-            } if dimensions.is_empty() => fields
-                .into_iter()
-                .find(|(candidate, _)| candidate.as_str() == field)
-                .map(|(_, seed)| seed),
-            _ => None,
-        }
-    })
+    definitions
+        .whole_loop_seed(name, context, span)
+        .ok()
+        .or_else(|| {
+            let (parent, field) = name.as_str().rsplit_once("__")?;
+            match definitions
+                .whole_loop_seed(&VarName::new(parent), context, span)
+                .ok()?
+            {
+                FunctionValueSeed::Record {
+                    dimensions, fields, ..
+                } if dimensions.is_empty() => fields
+                    .into_iter()
+                    .find(|(candidate, _)| candidate.as_str() == field)
+                    .map(|(_, seed)| seed),
+                _ => None,
+            }
+        })
 }
 
 fn validate_statement_function_with(
@@ -372,7 +378,11 @@ fn validate_statement_function_with(
     // A value read where only some paths assigned it is checked at run time
     // (MLS §12.4.4); it starts from its zero seed instead, after the analysis,
     // which keeps its plan (IF97 `boilingcurve_p`: `bpro.cv`).
-    let mut partial = definedness.asserted_reads.values().flatten().collect::<Vec<_>>();
+    let mut partial = definedness
+        .asserted_reads
+        .values()
+        .flatten()
+        .collect::<Vec<_>>();
     partial.sort();
     partial.dedup();
     for name in partial {

@@ -1,8 +1,8 @@
 //! Component-owned processing of one Modelica event boundary.
 
 use super::{
-    MeError, SolveMeKernel, advance_states_to_event_probe, event_right_limit_state_derivatives,
-    event_update_application_time, StateTimeCoincidence,
+    MeError, SolveMeKernel, StateTimeCoincidence, advance_states_to_event_probe,
+    event_right_limit_state_derivatives, event_update_application_time,
 };
 use crate::{
     runtime::{
@@ -19,7 +19,9 @@ pub(super) struct EventBoundaryOutcome {
 pub(super) fn event_boundary_horizon(event: RuntimeEventStop, target: f64, horizon: f64) -> f64 {
     match (event.pre_mode, event.observe_right_limit) {
         // (a time relation crossing at this instant is read past it: as far as a time event's)
-        (EventPreMode::EventEntry | EventPreMode::Fixed, _) if event.relation_right_limit => horizon,
+        (EventPreMode::EventEntry | EventPreMode::Fixed, _) if event.relation_right_limit => {
+            horizon
+        }
         (EventPreMode::EventEntry | EventPreMode::Fixed, _) => target,
         (EventPreMode::FollowCurrent, true) => horizon,
         (EventPreMode::FollowCurrent, false) => target,

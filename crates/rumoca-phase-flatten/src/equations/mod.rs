@@ -538,6 +538,28 @@ pub(crate) fn flatten_equation_with_def_map(
         }
 
         ast::Equation::FunctionCall { comp, args, .. } => {
+            // MLS §8.3.8: a `terminate(..)` under no condition holds from the
+            // start, so the run ends at its initialization. It stands so
+            // where it was written so, and where instantiation selected the
+            // branch of an if-equation it stood in (a parameter's condition).
+            if is_terminate_call(&inst_eq.equation)
+                && let Some(initial) = initial_call(&inst_eq.equation)
+            {
+                let mut flattened = FlattenedEquations::default();
+                flattened
+                    .when_chains
+                    .push(crate::when_equations::flatten_when_blocks(
+                        ctx,
+                        &[ast::EquationBlock {
+                            cond: initial,
+                            eqs: vec![inst_eq.equation.clone()],
+                        }],
+                        prefix,
+                        span,
+                        def_map,
+                    )?);
+                return Ok(flattened);
+            }
             flatten_function_call_equation(ctx, comp, args, prefix, span, def_map, &origin)
         }
 
