@@ -60,3 +60,62 @@ fn a_relation_of_time_beside_a_clock_is_right_where_it_was() {
         assert!((late - want).abs() < 1e-6 && k == ticks, "{relation}, period {period}: late {late}, ticks {k}");
     }
 }
+
+/// The tick's own work is done once: its print reports once per tick, though
+/// the relation that crosses at the tick's instant is read in a second pass.
+#[test]
+fn a_tick_s_print_reports_once_where_a_relation_of_time_crosses() {
+    let source = r#"
+package Streams
+  impure function print
+    input String string = "";
+    input String fileName = "";
+  external "C" ModelicaInternal_print(string, fileName);
+  end print;
+end Streams;
+
+model Once
+  Real late(start = 0, fixed = true);
+  discrete Real k(start = 0, fixed = true);
+  Boolean b;
+equation
+  b = time > 0.5;
+  der(late) = if b then 1 else 0;
+algorithm
+  when sample(0.5, 0.5) then
+    k := pre(k) + 1;
+    Streams.print("tick");
+  end when;
+end Once;
+"#;
+    let compiled = Compiler::new()
+        .model("Once")
+        .compile_str(source, "once.mo")
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    let result = simulate_dae_with_diagnostics(
+        &compiled.dae,
+        &SimOptions {
+            t_end: 1.0,
+            dt: Some(0.125),
+            ..SimOptions::default()
+        },
+    )
+    .expect("the model simulates");
+    let messages = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "WX002")
+        .map(|diagnostic| (diagnostic.time, diagnostic.message.as_str()))
+        .collect::<Vec<_>>();
+    let last = |name: &str| {
+        let column = result.names.iter().position(|n| n == name).expect(name);
+        *result.data[column].last().expect("a sample")
+    };
+    assert_eq!(messages, vec![(0.5, "tick"), (1.0, "tick")], "one report per tick");
+    assert!(
+        (last("late") - 0.5).abs() < 1e-6 && last("k") == 2.0,
+        "late {}, ticks {}",
+        last("late"),
+        last("k")
+    );
+}
