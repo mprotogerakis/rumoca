@@ -920,29 +920,14 @@ mod tests {
     fn mixed_min_max_coerce_their_integer_operand() {
         let span = Span::DUMMY;
         for builtin in [dae::PureBuiltin::Min, dae::PureBuiltin::Max] {
-            for operands in [
-                [gast::ScalarType::Real, gast::ScalarType::Integer],
-                [gast::ScalarType::Integer, gast::ScalarType::Real],
-            ] {
-                let lowered = lower_builtin_arguments(
-                    builtin,
-                    operands.iter().map(|t| typed(*t)).collect(),
-                    span,
-                )
-                .expect("mixed min/max lowers");
-                assert!(
-                    matches!(called_name(&lowered).as_str(), "min" | "max"),
-                    "{builtin:?}"
-                );
+            for operands in [[gast::ScalarType::Real, gast::ScalarType::Integer], [gast::ScalarType::Integer, gast::ScalarType::Real]] {
+                let lowered = lower_builtin_arguments(builtin, operands.iter().map(|t| typed(*t)).collect(), span)
+                    .expect("mixed min/max lowers");
+                assert!(matches!(called_name(&lowered).as_str(), "min" | "max"), "{builtin:?}");
                 for (argument, operand) in call_arguments(&lowered).iter().zip(operands) {
                     match operand {
-                        gast::ScalarType::Integer => {
-                            assert_eq!(called_name(argument), "real", "{builtin:?} {operands:?}")
-                        }
-                        _ => assert!(
-                            matches!(argument, gast::Expression::Integer(1)),
-                            "{builtin:?} {operands:?}: a Real left as it is"
-                        ),
+                        gast::ScalarType::Integer => assert_eq!(called_name(argument), "real", "{builtin:?} {operands:?}"),
+                        _ => assert!(matches!(argument, gast::Expression::Integer(1)), "{builtin:?} {operands:?}: a Real left as it is"),
                     }
                 }
             }

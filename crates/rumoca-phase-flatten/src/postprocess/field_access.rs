@@ -803,13 +803,11 @@ pub(crate) fn distribute_der_over_arrays(flat: &mut flat::Model) {
                 args,
                 span,
             } = expr
-                && let [
-                    Expression::Array {
-                        elements,
-                        kind,
-                        span: array_span,
-                    },
-                ] = args.as_slice()
+                && let [Expression::Array {
+                    elements,
+                    kind,
+                    span: array_span,
+                }] = args.as_slice()
             {
                 return Expression::Array {
                     elements: elements

@@ -41,36 +41,23 @@ fn run(relation: &str, period: &str) -> (f64, f64) {
 #[test]
 fn a_strict_relation_of_time_switches_at_a_coinciding_tick() {
     let (late, ticks) = run("time > 6", "2");
-    assert!(
-        (late - 4.0).abs() < 1e-6 && ticks == 6.0,
-        "late {late}, ticks {ticks}"
-    );
+    assert!((late - 4.0).abs() < 1e-6 && ticks == 6.0, "late {late}, ticks {ticks}");
 }
 
 /// The same with the tick at 0, 3, 6, 9.
 #[test]
 fn a_strict_relation_of_time_switches_at_another_clock_s_tick() {
     let (late, ticks) = run("time > 6", "3");
-    assert!(
-        (late - 4.0).abs() < 1e-6 && ticks == 4.0,
-        "late {late}, ticks {ticks}"
-    );
+    assert!((late - 4.0).abs() < 1e-6 && ticks == 4.0, "late {late}, ticks {ticks}");
 }
 
 /// What was right already stays right: no coincidence, and `>=`.
 #[test]
 fn a_relation_of_time_beside_a_clock_is_right_where_it_was() {
-    for (relation, period, ticks) in [
-        ("time > 6", "4", 3.0),
-        ("time >= 6", "2", 6.0),
-        ("time > 5", "2", 6.0),
-    ] {
+    for (relation, period, ticks) in [("time > 6", "4", 3.0), ("time >= 6", "2", 6.0), ("time > 5", "2", 6.0)] {
         let (late, k) = run(relation, period);
         let want = if relation.ends_with('5') { 5.0 } else { 4.0 };
-        assert!(
-            (late - want).abs() < 1e-6 && k == ticks,
-            "{relation}, period {period}: late {late}, ticks {k}"
-        );
+        assert!((late - want).abs() < 1e-6 && k == ticks, "{relation}, period {period}: late {late}, ticks {k}");
     }
 }
 
@@ -124,11 +111,7 @@ end Once;
         let column = result.names.iter().position(|n| n == name).expect(name);
         *result.data[column].last().expect("a sample")
     };
-    assert_eq!(
-        messages,
-        vec![(0.5, "tick"), (1.0, "tick")],
-        "one report per tick"
-    );
+    assert_eq!(messages, vec![(0.5, "tick"), (1.0, "tick")], "one report per tick");
     assert!(
         (last("late") - 0.5).abs() < 1e-6 && last("k") == 2.0,
         "late {}, ticks {}",
@@ -186,8 +169,5 @@ end Ends;
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>();
     let end = *result.times.last().expect("a sample");
-    assert!(
-        prints.is_empty() && (end - 0.5).abs() < 1e-9,
-        "prints {prints:?}, ended at {end}"
-    );
+    assert!(prints.is_empty() && (end - 0.5).abs() < 1e-9, "prints {prints:?}, ended at {end}");
 }

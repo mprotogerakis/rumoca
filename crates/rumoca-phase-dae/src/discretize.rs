@@ -20,8 +20,8 @@
 //! condition than a sample, an if-equation or a call with several outputs.
 
 use rumoca_core::{
-    BuiltinFunction, Causality, Expression, ExpressionVisitor, Literal, OpBinary, OpUnary,
-    Reference, Span, Subscript, VarName, Variability,
+    BuiltinFunction, Causality, Expression, ExpressionVisitor, Literal, OpBinary, OpUnary, Reference, Span, Subscript, VarName,
+    Variability,
 };
 use rumoca_ir_flat as flat;
 use std::collections::{HashMap, HashSet};
@@ -42,62 +42,35 @@ fn refuse(what: &str, detail: impl Into<String>, span: Span) -> ToDaeError {
 }
 
 fn var(name: &str) -> Expression {
-    Expression::VarRef {
-        name: Reference::new(name),
-        subscripts: vec![],
-        span: at(),
-    }
+    Expression::VarRef { name: Reference::new(name), subscripts: vec![], span: at() }
 }
 fn literal(value: Literal) -> Expression {
     Expression::Literal { value, span: at() }
 }
 fn builtin(function: BuiltinFunction, args: Vec<Expression>) -> Expression {
-    Expression::BuiltinCall {
-        function,
-        args,
-        span: at(),
-    }
+    Expression::BuiltinCall { function, args, span: at() }
 }
 fn pre(e: Expression) -> Expression {
     builtin(BuiltinFunction::Pre, vec![e])
 }
 fn binary(op: OpBinary, lhs: Expression, rhs: Expression) -> Expression {
-    Expression::Binary {
-        op,
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-        span: at(),
-    }
+    Expression::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span: at() }
 }
 fn not(e: Expression) -> Expression {
-    Expression::Unary {
-        op: OpUnary::Not,
-        rhs: Box::new(e),
-        span: at(),
-    }
+    Expression::Unary { op: OpUnary::Not, rhs: Box::new(e), span: at() }
 }
 fn select(branches: Vec<(Expression, Expression)>, otherwise: Expression) -> Expression {
     if branches.is_empty() {
         return otherwise;
     }
-    Expression::If {
-        branches,
-        else_branch: Box::new(otherwise),
-        span: at(),
-    }
+    Expression::If { branches, else_branch: Box::new(otherwise), span: at() }
 }
 fn any(terms: Vec<Expression>) -> Expression {
-    terms
-        .into_iter()
-        .reduce(|a, b| binary(OpBinary::Or, a, b))
-        .unwrap_or(literal(Literal::Boolean(false)))
+    terms.into_iter().reduce(|a, b| binary(OpBinary::Or, a, b)).unwrap_or(literal(Literal::Boolean(false)))
 }
 
 /// An expression rebuilt: `f` replaces a node (and nothing below it), else its children are.
-fn rewrite(
-    e: &mut Expression,
-    f: &mut dyn FnMut(&Expression) -> Result<Option<Expression>, ToDaeError>,
-) -> Result<(), ToDaeError> {
+fn rewrite(e: &mut Expression, f: &mut dyn FnMut(&Expression) -> Result<Option<Expression>, ToDaeError>) -> Result<(), ToDaeError> {
     if let Some(new) = f(e)? {
         *e = new;
         return Ok(());
@@ -114,11 +87,7 @@ fn rewrite(
             }
         }
         Expression::StringConversion { value, .. } => rewrite(value, f)?,
-        Expression::If {
-            branches,
-            else_branch,
-            ..
-        } => {
+        Expression::If { branches, else_branch, .. } => {
             for (c, v) in branches {
                 rewrite(c, f)?;
                 rewrite(v, f)?;
@@ -130,9 +99,7 @@ fn rewrite(
                 rewrite(x, f)?;
             }
         }
-        Expression::Range {
-            start, step, end, ..
-        } => {
+        Expression::Range { start, step, end, .. } => {
             rewrite(start, f)?;
             if let Some(s) = step {
                 rewrite(s, f)?;
@@ -155,17 +122,8 @@ fn rewrite(
 /// GALEC projects no reduction of a literal matrix.
 fn fold_reductions(e: &mut Expression) -> Result<(), ToDaeError> {
     rewrite(e, &mut |node| {
-        let Expression::BuiltinCall {
-            function: f @ (BuiltinFunction::Max | BuiltinFunction::Min),
-            args,
-            span,
-        } = node
-        else {
-            return Ok(None);
-        };
-        let [Expression::Array { .. }] = args.as_slice() else {
-            return Ok(None);
-        };
+        let Expression::BuiltinCall { function: f @ (BuiltinFunction::Max | BuiltinFunction::Min), args, span } = node else { return Ok(None) };
+        let [Expression::Array { .. }] = args.as_slice() else { return Ok(None) };
         fn leaves(e: &Expression, out: &mut Vec<Expression>) -> bool {
             match e {
                 Expression::Array { elements, .. } => elements.iter().all(|x| leaves(x, out)),
@@ -184,11 +142,7 @@ fn fold_reductions(e: &mut Expression) -> Result<(), ToDaeError> {
             fold_reductions(x)?;
         }
         let (f, span) = (*f, *span);
-        Ok(items.into_iter().reduce(|a, b| Expression::BuiltinCall {
-            function: f,
-            args: vec![a, b],
-            span,
-        }))
+        Ok(items.into_iter().reduce(|a, b| Expression::BuiltinCall { function: f, args: vec![a, b], span }))
     })
 }
 
@@ -229,23 +183,12 @@ impl Added {
     }
 
     fn assign(&mut self, target: &str, value: Expression, origin: &str) {
-        self.tick.push(flat::WhenEquation::Assign {
-            target: VarName::new(target),
-            value,
-            span: at(),
-            origin: origin.to_string(),
-        });
+        self.tick.push(flat::WhenEquation::Assign { target: VarName::new(target), value, span: at(), origin: origin.to_string() });
     }
 
     /// A memory of `value` (its kind; its value before the first tick, else 0 or false), set at
     /// each tick: its name.
-    fn memory(
-        &mut self,
-        what: &str,
-        kind: Kind,
-        value: Expression,
-        before: Option<Expression>,
-    ) -> String {
+    fn memory(&mut self, what: &str, kind: Kind, value: Expression, before: Option<Expression>) -> String {
         let name = self.fresh(&format!("pre.{what}"));
         let start = before.unwrap_or_else(|| match kind {
             Kind::Real => literal(Literal::Real(0.0)),
@@ -263,13 +206,8 @@ impl Added {
             Some(n) => n.clone(),
             None => {
                 let n = self.fresh("initial.first");
-                self.vars
-                    .push((n.clone(), Kind::Boolean, literal(Literal::Boolean(true))));
-                self.assign(
-                    &n,
-                    literal(Literal::Boolean(false)),
-                    "a discretized model's first tick",
-                );
+                self.vars.push((n.clone(), Kind::Boolean, literal(Literal::Boolean(true))));
+                self.assign(&n, literal(Literal::Boolean(false)), "a discretized model's first tick");
                 self.first = Some(n.clone());
                 n
             }
@@ -283,13 +221,8 @@ impl Added {
             Some(n) => n.clone(),
             None => {
                 let n = self.fresh("time.tick");
-                self.vars
-                    .push((n.clone(), Kind::Real, literal(Literal::Real(-period))));
-                self.assign(
-                    &n,
-                    binary(OpBinary::Add, pre(var(&n)), literal(Literal::Real(period))),
-                    "a discretized model's time",
-                );
+                self.vars.push((n.clone(), Kind::Real, literal(Literal::Real(-period))));
+                self.assign(&n, binary(OpBinary::Add, pre(var(&n)), literal(Literal::Real(period))), "a discretized model's time");
                 self.time = Some(n.clone());
                 n
             }
@@ -315,31 +248,16 @@ fn number(e: &Expression, m: &flat::Model, depth: usize) -> Option<f64> {
         return None;
     }
     match e {
-        Expression::Literal {
-            value: Literal::Real(v),
-            ..
-        } => Some(*v),
-        Expression::Literal {
-            value: Literal::Integer(v),
-            ..
-        } => Some(*v as f64),
-        Expression::VarRef {
-            name, subscripts, ..
-        } if subscripts.is_empty() => {
+        Expression::Literal { value: Literal::Real(v), .. } => Some(*v),
+        Expression::Literal { value: Literal::Integer(v), .. } => Some(*v as f64),
+        Expression::VarRef { name, subscripts, .. } if subscripts.is_empty() => {
             let v = m.variables.get(name.var_name())?;
-            if !matches!(
-                v.variability,
-                Variability::Parameter(_) | Variability::Constant(_)
-            ) {
+            if !matches!(v.variability, Variability::Parameter(_) | Variability::Constant(_)) {
                 return None;
             }
             number(v.binding.as_ref().or(v.start.as_ref())?, m, depth + 1)
         }
-        Expression::Unary {
-            op: OpUnary::Minus,
-            rhs,
-            ..
-        } => Some(-number(rhs, m, depth + 1)?),
+        Expression::Unary { op: OpUnary::Minus, rhs, .. } => Some(-number(rhs, m, depth + 1)?),
         Expression::Binary { op, lhs, rhs, .. } => {
             let (a, b) = (number(lhs, m, depth + 1)?, number(rhs, m, depth + 1)?);
             match op {
@@ -366,74 +284,25 @@ struct Scope<'a> {
 fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), ToDaeError> {
     rewrite(e, &mut |node| {
         Ok(match node {
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Der,
-                args,
-                span,
-            } => match args.as_slice() {
-                [
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                ] if scope.states.contains(name.var_name()) => Some(Expression::VarRef {
-                    name: Reference::new(format!("der.{}", name.var_name().as_str())),
-                    subscripts: subscripts.clone(),
-                    span: *span,
-                }),
-                _ => {
-                    return Err(refuse(
-                        "discretization",
-                        "der() of an expression: only der() of a state is discretized",
-                        *span,
-                    ));
+            Expression::BuiltinCall { function: BuiltinFunction::Der, args, span } => match args.as_slice() {
+                [Expression::VarRef { name, subscripts, .. }] if scope.states.contains(name.var_name()) => {
+                    Some(Expression::VarRef { name: Reference::new(format!("der.{}", name.var_name().as_str())), subscripts: subscripts.clone(), span: *span })
                 }
+                _ => return Err(refuse("discretization", "der() of an expression: only der() of a state is discretized", *span)),
             },
-            Expression::VarRef {
-                name,
-                subscripts,
-                span,
-            } if scope.states.contains(name.var_name()) => Some(pre(Expression::VarRef {
-                name: name.clone(),
-                subscripts: subscripts.clone(),
-                span: *span,
-            })),
-            Expression::VarRef {
-                name, subscripts, ..
-            } if name.var_name().as_str() == "time" && subscripts.is_empty() => {
-                Some(added.time(scope.period))
+            Expression::VarRef { name, subscripts, span } if scope.states.contains(name.var_name()) => {
+                Some(pre(Expression::VarRef { name: name.clone(), subscripts: subscripts.clone(), span: *span }))
             }
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Initial,
-                ..
-            } => Some(added.initial()),
+            Expression::VarRef { name, subscripts, .. } if name.var_name().as_str() == "time" && subscripts.is_empty() => Some(added.time(scope.period)),
+            Expression::BuiltinCall { function: BuiltinFunction::Initial, .. } => Some(added.initial()),
             // (a delay of a fixed time: its value that many cycles ago, through a chain of memories
             // filled with its value at the first tick)
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Delay,
-                args,
-                span,
-            } => {
-                let (Some(u), Some(t)) = (args.first(), args.get(1)) else {
-                    return Err(refuse(
-                        "discretization",
-                        "delay() of a value and a time",
-                        *span,
-                    ));
-                };
-                let t = number(t, scope.model, 0).ok_or_else(|| {
-                    refuse(
-                        "discretization",
-                        "delay() of a time not fixed by parameters: not exported as code",
-                        *span,
-                    )
-                })?;
+            Expression::BuiltinCall { function: BuiltinFunction::Delay, args, span } => {
+                let (Some(u), Some(t)) = (args.first(), args.get(1)) else { return Err(refuse("discretization", "delay() of a value and a time", *span)) };
+                let t = number(t, scope.model, 0).ok_or_else(|| refuse("discretization", "delay() of a time not fixed by parameters: not exported as code", *span))?;
                 let n = (t / scope.period).round();
                 if !(0.0..=100_000.0).contains(&n) {
-                    return Err(refuse(
-                        "discretization",
-                        format!("delay() of {t} s: {n} cycles"),
-                        *span,
-                    ));
+                    return Err(refuse("discretization", format!("delay() of {t} s: {n} cycles"), *span));
                 }
                 let mut u = u.clone();
                 observe(&mut u, scope, added)?;
@@ -446,95 +315,38 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
                 let mut last = String::new();
                 for k in 0..n as usize {
                     let feed = if k == 0 { u.clone() } else { pre(var(&last)) };
-                    last = added.memory(
-                        "delay",
-                        Kind::Real,
-                        select(vec![(first.clone(), u.clone())], feed),
-                        None,
-                    );
+                    last = added.memory("delay", Kind::Real, select(vec![(first.clone(), u.clone())], feed), None);
                 }
-                let out = added.memory(
-                    "delayed",
-                    Kind::Real,
-                    select(vec![(first, u)], pre(var(&last))),
-                    None,
-                );
+                let out = added.memory("delayed", Kind::Real, select(vec![(first, u)], pre(var(&last))), None);
                 Some(var(&out))
             }
-            Expression::BuiltinCall {
-                function: f @ BuiltinFunction::Terminal,
-                span,
-                ..
-            } => {
-                return Err(refuse(
-                    "discretization",
-                    format!(
-                        "{}() in a model exported as code run once a period",
-                        f.name()
-                    ),
-                    *span,
-                ));
+            Expression::BuiltinCall { function: f @ BuiltinFunction::Terminal, span, .. } => {
+                return Err(refuse("discretization", format!("{}() in a model exported as code run once a period", f.name()), *span));
             }
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Edge,
-                args,
-                span,
-            } => {
-                let [b] = args.as_slice() else {
-                    return Err(refuse("discretization", "edge() of one argument", *span));
-                };
+            Expression::BuiltinCall { function: BuiltinFunction::Edge, args, span } => {
+                let [b] = args.as_slice() else { return Err(refuse("discretization", "edge() of one argument", *span)) };
                 let mut b = b.clone();
                 observe(&mut b, scope, added)?;
                 let m = added.memory("edge", Kind::Boolean, b.clone(), None);
                 Some(binary(OpBinary::And, b, not(pre(var(&m)))))
             }
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Change,
-                args,
-                span,
-            } => {
-                let [v] = args.as_slice() else {
-                    return Err(refuse("discretization", "change() of one argument", *span));
-                };
+            Expression::BuiltinCall { function: BuiltinFunction::Change, args, span } => {
+                let [v] = args.as_slice() else { return Err(refuse("discretization", "change() of one argument", *span)) };
                 let kind = match v {
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    } if subscripts.is_empty() => {
-                        scope.kinds.get(name.var_name().as_str()).copied()
-                    }
+                    Expression::VarRef { name, subscripts, .. } if subscripts.is_empty() => scope.kinds.get(name.var_name().as_str()).copied(),
                     _ => None,
                 }
-                .ok_or_else(|| {
-                    refuse(
-                        "discretization",
-                        "change() of a scalar variable only",
-                        *span,
-                    )
-                })?;
+                .ok_or_else(|| refuse("discretization", "change() of a scalar variable only", *span))?;
                 let mut v = v.clone();
                 observe(&mut v, scope, added)?;
                 let m = added.memory("change", kind, v.clone(), None);
                 Some(binary(OpBinary::Neq, v, pre(var(&m))))
             }
             // (pre of what no `when` sets, a Boolean an equation defines: against its memory)
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Pre,
-                args,
-                span,
-            } => match args.as_slice() {
-                [
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                ] if subscripts.is_empty()
-                    && !scope.when_set.contains(name.var_name().as_str())
-                    && !scope.states.contains(name.var_name()) =>
-                {
+            Expression::BuiltinCall { function: BuiltinFunction::Pre, args, span } => match args.as_slice() {
+                [Expression::VarRef { name, subscripts, .. }] if subscripts.is_empty() && !scope.when_set.contains(name.var_name().as_str()) && !scope.states.contains(name.var_name()) => {
                     let n = name.var_name().as_str();
-                    let kind =
-                        scope.kinds.get(n).copied().ok_or_else(|| {
-                            refuse("discretization", format!("pre() of {n}"), *span)
-                        })?;
+                    let kind = scope.kinds.get(n).copied().ok_or_else(|| refuse("discretization", format!("pre() of {n}"), *span))?;
                     let m = match added.of.get(n) {
                         Some(m) => m.clone(),
                         None => {
@@ -556,14 +368,8 @@ fn observe(e: &mut Expression, scope: &Scope, added: &mut Added) -> Result<(), T
 /// Whether a `when` condition is a sample (or samples): such a `when` is clocked already.
 fn is_sample(c: &Expression) -> bool {
     match c {
-        Expression::BuiltinCall {
-            function: BuiltinFunction::Sample,
-            args,
-            ..
-        } => args.len() == 2,
-        Expression::Array { elements, .. } => {
-            !elements.is_empty() && elements.iter().all(is_sample)
-        }
+        Expression::BuiltinCall { function: BuiltinFunction::Sample, args, .. } => args.len() == 2,
+        Expression::Array { elements, .. } => !elements.is_empty() && elements.iter().all(is_sample),
         _ => false,
     }
 }
@@ -578,41 +384,21 @@ fn rose(c: &Expression, scope: &Scope, added: &mut Added) -> Result<Expression, 
     let mut terms = vec![];
     for el in elements {
         match &el {
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Initial,
-                ..
-            } => terms.push(added.initial()),
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Sample,
-                args,
-                span,
-            } => {
+            Expression::BuiltinCall { function: BuiltinFunction::Initial, .. } => terms.push(added.initial()),
+            Expression::BuiltinCall { function: BuiltinFunction::Sample, args, span } => {
                 let number = |e: &Expression| match e {
-                    Expression::Literal {
-                        value: Literal::Real(v),
-                        ..
-                    } => Some(*v),
-                    Expression::Literal {
-                        value: Literal::Integer(v),
-                        ..
-                    } => Some(*v as f64),
+                    Expression::Literal { value: Literal::Real(v), .. } => Some(*v),
+                    Expression::Literal { value: Literal::Integer(v), .. } => Some(*v as f64),
                     _ => None,
                 };
                 let every = matches!(args.as_slice(), [a, b] if number(a) == Some(0.0) && number(b).is_some_and(|p| (p - scope.period).abs() <= 1e-12 * scope.period.max(1.0)));
                 if !every {
-                    return Err(refuse(
-                        "discretization",
-                        "a when on a sample of another period beside conditions of its own",
-                        *span,
-                    ));
+                    return Err(refuse("discretization", "a when on a sample of another period beside conditions of its own", *span));
                 }
                 terms.push(literal(Literal::Boolean(true)));
             }
             // (an edge already: that, not a rise of it)
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Edge,
-                ..
-            } => {
+            Expression::BuiltinCall { function: BuiltinFunction::Edge, .. } => {
                 let mut b = el.clone();
                 observe(&mut b, scope, added)?;
                 terms.push(b);
@@ -623,11 +409,7 @@ fn rose(c: &Expression, scope: &Scope, added: &mut Added) -> Result<Expression, 
                 // (a condition true from the start no rise: as a when, which only a change fires)
                 let m = added.memory("when", Kind::Boolean, b.clone(), None);
                 let first = added.initial();
-                terms.push(binary(
-                    OpBinary::And,
-                    binary(OpBinary::And, b, not(pre(var(&m)))),
-                    not(first),
-                ));
+                terms.push(binary(OpBinary::And, binary(OpBinary::And, b, not(pre(var(&m)))), not(first)));
             }
         }
     }
@@ -637,19 +419,10 @@ fn rose(c: &Expression, scope: &Scope, added: &mut Added) -> Result<Expression, 
 /// The flat model `model` discretized at `period` seconds by explicit Euler (see the module).
 pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, ToDaeError> {
     if !(period > 0.0 && period.is_finite()) {
-        return Err(refuse(
-            "discretization",
-            format!("a period of {period} s"),
-            at(),
-        ));
+        return Err(refuse("discretization", format!("a period of {period} s"), at()));
     }
     let mut m = model.clone();
-    let anchor = m
-        .equations
-        .first()
-        .map(|e| e.span)
-        .or_else(|| m.variables.values().next().map(|v| v.source_span))
-        .unwrap_or(Span::DUMMY);
+    let anchor = m.equations.first().map(|e| e.span).or_else(|| m.variables.values().next().map(|v| v.source_span)).unwrap_or(Span::DUMMY);
     AT.with(|a| a.set(anchor));
     // the states, in their order
     let mut found: Vec<VarName> = vec![];
@@ -657,10 +430,7 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
         eq.residual.collect_state_variables(&mut found);
     }
     let mut states: HashSet<VarName> = HashSet::new();
-    let order: Vec<VarName> = found
-        .into_iter()
-        .filter(|x| states.insert(x.clone()))
-        .collect();
+    let order: Vec<VarName> = found.into_iter().filter(|x| states.insert(x.clone())).collect();
     let when_set: HashSet<String> = m
         .when_chains
         .iter()
@@ -668,9 +438,7 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
         .flat_map(|b| b.equations.iter())
         .filter_map(|e| match e {
             flat::WhenEquation::Assign { target, .. } => Some(target.as_str().to_string()),
-            flat::WhenEquation::AssignElement { target, .. } => {
-                Some(target.var_name().as_str().to_string())
-            }
+            flat::WhenEquation::AssignElement { target, .. } => Some(target.var_name().as_str().to_string()),
             _ => None,
         })
         .collect();
@@ -678,33 +446,12 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     let p = m.predefined_types;
     let kind_of = |t: rumoca_core::TypeId| -> Option<Kind> {
         let c = m.effective_types.get(&t).map(|e| e.canonical_type())?;
-        if c == p.real {
-            Some(Kind::Real)
-        } else if c == p.integer {
-            Some(Kind::Integer)
-        } else if c == p.boolean {
-            Some(Kind::Boolean)
-        } else {
-            None
-        }
+        if c == p.real { Some(Kind::Real) } else if c == p.integer { Some(Kind::Integer) } else if c == p.boolean { Some(Kind::Boolean) } else { None }
     };
-    let kinds: HashMap<String, Kind> = m
-        .variables
-        .iter()
-        .filter_map(|(n, v)| Some((n.as_str().to_string(), kind_of(v.type_id)?)))
-        .collect();
-    let mut added = Added {
-        taken: m.variables.keys().map(|n| n.as_str().to_string()).collect(),
-        ..Default::default()
-    };
+    let kinds: HashMap<String, Kind> = m.variables.iter().filter_map(|(n, v)| Some((n.as_str().to_string(), kind_of(v.type_id)?))).collect();
+    let mut added = Added { taken: m.variables.keys().map(|n| n.as_str().to_string()).collect(), ..Default::default() };
     let model_before = m.clone();
-    let scope = Scope {
-        model: &model_before,
-        states: &states,
-        when_set: &when_set,
-        kinds: &kinds,
-        period,
-    };
+    let scope = Scope { model: &model_before, states: &states, when_set: &when_set, kinds: &kinds, period };
 
     // an algorithm over the states or time: not yet
     for alg in &m.algorithms {
@@ -712,39 +459,18 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
         for st in &alg.statements {
             flat::StatementVisitor::visit_statement(&mut c, st);
         }
-        if let Some(n) =
-            c.0.iter()
-                .find(|n| states.contains(*n) || n.as_str() == "time")
-        {
-            return Err(refuse(
-                "discretization",
-                format!(
-                    "an algorithm reading {} (a state or time): not exported as code yet",
-                    n.as_str()
-                ),
-                alg.span,
-            ));
+        if let Some(n) = c.0.iter().find(|n| states.contains(*n) || n.as_str() == "time") {
+            return Err(refuse("discretization", format!("an algorithm reading {} (a state or time): not exported as code yet", n.as_str()), alg.span));
         }
     }
     if let Some(a) = m.initial_algorithms.first() {
-        return Err(refuse(
-            "discretization",
-            "an initial algorithm: not exported as code",
-            a.span,
-        ));
+        return Err(refuse("discretization", "an initial algorithm: not exported as code", a.span));
     }
     // an initial equation x = e of a state, e of parameters: its start value
     let fixed_only = |e: &Expression| {
         let mut refs: Vec<VarName> = vec![];
         e.collect_var_refs(&mut refs);
-        refs.iter().all(|n| {
-            m.variables.get(n).is_some_and(|v| {
-                matches!(
-                    v.variability,
-                    Variability::Parameter(_) | Variability::Constant(_)
-                )
-            })
-        })
+        refs.iter().all(|n| m.variables.get(n).is_some_and(|v| matches!(v.variability, Variability::Parameter(_) | Variability::Constant(_))))
     };
     let mut starts: Vec<(VarName, Expression)> = vec![];
     let mut pre_starts: Vec<(VarName, Expression)> = vec![];
@@ -756,68 +482,26 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     };
     for eq in &m.initial_equations {
         let pre_of = |e: &Expression| match e {
-            Expression::BuiltinCall {
-                function: BuiltinFunction::Pre,
-                args,
-                ..
-            } => match args.as_slice() {
-                [
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                ] if subscripts.is_empty() => Some(name.var_name().clone()),
+            Expression::BuiltinCall { function: BuiltinFunction::Pre, args, .. } => match args.as_slice() {
+                [Expression::VarRef { name, subscripts, .. }] if subscripts.is_empty() => Some(name.var_name().clone()),
                 _ => None,
             },
             _ => None,
         };
         let found = match &eq.residual {
-            Expression::Binary {
-                op: OpBinary::Sub,
-                lhs,
-                rhs,
-                ..
-            } => match (lhs.as_ref(), rhs.as_ref()) {
-                (
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                    e,
-                )
-                | (
-                    e,
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                ) if subscripts.is_empty() && states.contains(name.var_name()) && fixed_only(e) => {
-                    Some((name.var_name().clone(), e.clone(), false))
-                }
-                (p, e) | (e, p) if pre_of(p).is_some() && fixed_only(e) => {
-                    Some((pre_of(p).unwrap(), e.clone(), true))
-                }
+            Expression::Binary { op: OpBinary::Sub, lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
+                (Expression::VarRef { name, subscripts, .. }, e) | (e, Expression::VarRef { name, subscripts, .. })
+                    if subscripts.is_empty() && states.contains(name.var_name()) && fixed_only(e) => Some((name.var_name().clone(), e.clone(), false)),
+                (p, e) | (e, p) if pre_of(p).is_some() && fixed_only(e) => Some((pre_of(p).unwrap(), e.clone(), true)),
                 _ => None,
             },
             _ => None,
         };
         // (a state's of anything but parameters, as `y = u`: its value at the first tick)
         let found = found.or_else(|| match &eq.residual {
-            Expression::Binary {
-                op: OpBinary::Sub,
-                lhs,
-                rhs,
-                ..
-            } => match (lhs.as_ref(), rhs.as_ref()) {
-                (
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                    e,
-                )
-                | (
-                    e,
-                    Expression::VarRef {
-                        name, subscripts, ..
-                    },
-                ) if subscripts.is_empty() && states.contains(name.var_name()) && !has_der(e) => {
+            Expression::Binary { op: OpBinary::Sub, lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
+                (Expression::VarRef { name, subscripts, .. }, e) | (e, Expression::VarRef { name, subscripts, .. })
+                    if subscripts.is_empty() && states.contains(name.var_name()) && !has_der(e) => {
                     first_tick.push((name.var_name().clone(), e.clone()));
                     Some((name.var_name().clone(), e.clone(), false))
                 }
@@ -825,10 +509,7 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
             },
             _ => None,
         });
-        if found
-            .as_ref()
-            .is_some_and(|(x, _, pre)| !pre && first_tick.iter().any(|(y, _)| y == x))
-        {
+        if found.as_ref().is_some_and(|(x, _, pre)| !pre && first_tick.iter().any(|(y, _)| y == x)) {
             continue;
         }
         match found {
@@ -837,23 +518,13 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
                 pre_starts.push((v, e));
             }
             Some((x, e, false)) => starts.push((x, e)),
-            None => {
-                return Err(refuse(
-                    "discretization",
-                    "an initial equation other than a state's or a pre-value's value (x = x0, pre(y) = y0, y = u): not exported as code, a steady state (der(x) = 0) neither; set initType = NoInit, InitialState or InitialOutput",
-                    eq.span,
-                ));
-            }
+            None => return Err(refuse("discretization", "an initial equation other than a state's or a pre-value's value (x = x0, pre(y) = y0, y = u): not exported as code, a steady state (der(x) = 0) neither; set initType = NoInit, InitialState or InitialOutput", eq.span)),
         }
     }
     m.initial_equations.clear();
     m.initial_structured_equations.clear();
     // (a state's start; a when-set variable's pre-value its start too, its value before the first tick)
-    for (x, e) in starts.into_iter().chain(
-        pre_starts
-            .into_iter()
-            .filter(|(v, _)| when_set.contains(v.as_str())),
-    ) {
+    for (x, e) in starts.into_iter().chain(pre_starts.into_iter().filter(|(v, _)| when_set.contains(v.as_str()))) {
         if let Some(v) = m.variables.get_mut(&x) {
             v.start = Some(e);
             v.fixed = Some(vec![true]);
@@ -881,11 +552,7 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     // their condition rose
     let mut kept = vec![];
     let mut on: Vec<(String, Vec<(Expression, Expression)>)> = vec![]; // (target, its branches)
-    let mut on_element: Vec<(
-        Reference,
-        Vec<rumoca_core::Subscript>,
-        Vec<(Expression, Expression)>,
-    )> = vec![];
+    let mut on_element: Vec<(Reference, Vec<rumoca_core::Subscript>, Vec<(Expression, Expression)>)> = vec![];
     let mut reinits: HashMap<VarName, Vec<(Expression, Expression)>> = HashMap::new();
     let mut asserts: Vec<flat::WhenEquation> = vec![];
     for mut chain in std::mem::take(&mut m.when_chains) {
@@ -893,17 +560,8 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
             for b in chain.branches_mut() {
                 for e in &mut b.equations {
                     match e {
-                        flat::WhenEquation::Assign { value, .. }
-                        | flat::WhenEquation::AssignElement { value, .. } => {
-                            observe(value, &scope, &mut added)?
-                        }
-                        flat::WhenEquation::Reinit { span, .. } => {
-                            return Err(refuse(
-                                "discretization",
-                                "reinit in a when on samples: not exported as code",
-                                *span,
-                            ));
-                        }
+                        flat::WhenEquation::Assign { value, .. } | flat::WhenEquation::AssignElement { value, .. } => observe(value, &scope, &mut added)?,
+                        flat::WhenEquation::Reinit { span, .. } => return Err(refuse("discretization", "reinit in a when on samples: not exported as code", *span)),
                         _ => {}
                     }
                 }
@@ -923,67 +581,28 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
                             None => on.push((target.as_str().to_string(), vec![(r.clone(), v)])),
                         }
                     }
-                    flat::WhenEquation::AssignElement {
-                        target,
-                        subscripts,
-                        value,
-                        ..
-                    } => {
+                    flat::WhenEquation::AssignElement { target, subscripts, value, .. } => {
                         let mut v = value.clone();
                         observe(&mut v, &scope, &mut added)?;
-                        match on_element.iter_mut().find(|(t, s, _)| {
-                            t.var_name() == target.var_name()
-                                && format!("{s:?}") == format!("{subscripts:?}")
-                        }) {
+                        match on_element.iter_mut().find(|(t, s, _)| t.var_name() == target.var_name() && format!("{s:?}") == format!("{subscripts:?}")) {
                             Some((_, _, bs)) => bs.push((r.clone(), v)),
-                            None => on_element.push((
-                                target.clone(),
-                                subscripts.clone(),
-                                vec![(r.clone(), v)],
-                            )),
+                            None => on_element.push((target.clone(), subscripts.clone(), vec![(r.clone(), v)])),
                         }
                     }
-                    flat::WhenEquation::Reinit {
-                        state, value, span, ..
-                    } => {
+                    flat::WhenEquation::Reinit { state, value, span, .. } => {
                         if !states.contains(state) {
-                            return Err(refuse(
-                                "discretization",
-                                format!("reinit of {}, no state", state.as_str()),
-                                *span,
-                            ));
+                            return Err(refuse("discretization", format!("reinit of {}, no state", state.as_str()), *span));
                         }
                         let mut v = value.clone();
                         observe(&mut v, &scope, &mut added)?;
-                        reinits
-                            .entry(state.clone())
-                            .or_default()
-                            .push((r.clone(), v));
+                        reinits.entry(state.clone()).or_default().push((r.clone(), v));
                     }
-                    flat::WhenEquation::Assert {
-                        condition,
-                        message,
-                        level,
-                        span,
-                        origin,
-                    } => {
+                    flat::WhenEquation::Assert { condition, message, level, span, origin } => {
                         let mut c = condition.clone();
                         observe(&mut c, &scope, &mut added)?;
-                        asserts.push(flat::WhenEquation::Assert {
-                            condition: binary(OpBinary::Or, not(r.clone()), c),
-                            message: message.clone(),
-                            level: level.clone(),
-                            span: *span,
-                            origin: origin.clone(),
-                        });
+                        asserts.push(flat::WhenEquation::Assert { condition: binary(OpBinary::Or, not(r.clone()), c), message: message.clone(), level: level.clone(), span: *span, origin: origin.clone() });
                     }
-                    other => {
-                        return Err(refuse(
-                            "discretization",
-                            "an if-equation, a call of several outputs or terminate() in a when: not exported as code",
-                            other.span(),
-                        ));
-                    }
+                    other => return Err(refuse("discretization", "an if-equation, a call of several outputs or terminate() in a when: not exported as code", other.span())),
                 }
             }
         }
@@ -999,65 +618,31 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
     }
     for x in &order {
         let n = x.as_str();
-        let step = binary(
-            OpBinary::Add,
-            pre(var(n)),
-            binary(
-                OpBinary::Mul,
-                literal(Literal::Real(period)),
-                var(&format!("der.{n}")),
-            ),
-        );
-        let mut branches: Vec<(Expression, Expression)> = first_values
-            .remove(x)
-            .map(|e| (added.initial(), e))
-            .into_iter()
-            .collect();
+        let step = binary(OpBinary::Add, pre(var(n)), binary(OpBinary::Mul, literal(Literal::Real(period)), var(&format!("der.{n}"))));
+        let mut branches: Vec<(Expression, Expression)> = first_values.remove(x).map(|e| (added.initial(), e)).into_iter().collect();
         branches.extend(reinits.remove(x).unwrap_or_default());
         let value = select(branches, step);
         added.assign(n, value, "a discretized state's Euler step");
     }
     for (target, branches) in on {
-        added.assign(
-            &target,
-            select(branches, pre(var(&target))),
-            "a discretized when",
-        );
+        added.assign(&target, select(branches, pre(var(&target))), "a discretized when");
     }
     for (target, subscripts, branches) in on_element {
-        let old = pre(Expression::VarRef {
-            name: target.clone(),
-            subscripts: subscripts.clone(),
-            span: at(),
-        });
-        added.tick.push(flat::WhenEquation::AssignElement {
-            target,
-            subscripts,
-            value: select(branches, old),
-            span: at(),
-            origin: "a discretized when".into(),
-        });
+        let old = pre(Expression::VarRef { name: target.clone(), subscripts: subscripts.clone(), span: at() });
+        added.tick.push(flat::WhenEquation::AssignElement { target, subscripts, value: select(branches, old), span: at(), origin: "a discretized when".into() });
     }
     added.tick.extend(asserts);
 
     // the variables: the states discrete; their derivatives, the memories, first and time new
     let template = m.variables.values().next().cloned();
     // (each new variable an occurrence of its own)
-    let mut next_id = m
-        .variables
-        .values()
-        .map(|v| v.instance_id.0)
-        .chain(m.record_instances.values().map(|r| r.instance_id.0))
-        .max()
-        .unwrap_or(0);
+    let mut next_id = m.variables.values().map(|v| v.instance_id.0).chain(m.record_instances.values().map(|r| r.instance_id.0)).max().unwrap_or(0);
     let mut fresh_id = || {
         next_id += 1;
         rumoca_core::InstanceId::new(next_id)
     };
     for x in &order {
-        let Some(v) = m.variables.get_mut(x) else {
-            continue;
-        };
+        let Some(v) = m.variables.get_mut(x) else { continue };
         v.variability = Variability::Discrete(Default::default());
         let mut d = v.clone();
         d.name = VarName::new(format!("der.{}", x.as_str()));
@@ -1090,36 +675,12 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
                 Kind::Boolean => (m.predefined_types.boolean, "Boolean"),
             };
             // (a scalar effective type of that kind: one the model has, else a new one)
-            let found = m
-                .effective_types
-                .iter()
-                .find(|(_, e)| {
-                    e.canonical_type() == canonical
-                        && e.nominal_type() == canonical
-                        && e.dimensions().is_empty()
-                })
-                .map(|(k, _)| *k);
+            let found = m.effective_types.iter().find(|(_, e)| e.canonical_type() == canonical && e.nominal_type() == canonical && e.dimensions().is_empty()).map(|(k, _)| *k);
             let type_id = match found {
                 Some(k) => k,
                 None => {
-                    let key = rumoca_core::TypeId::new(
-                        m.effective_types
-                            .keys()
-                            .map(|k| k.0)
-                            .filter(|k| *k != u32::MAX)
-                            .max()
-                            .unwrap_or(0)
-                            + 1,
-                    );
-                    let e =
-                        rumoca_core::EffectiveType::new(canonical, canonical, Vec::<i64>::new())
-                            .map_err(|e| {
-                                refuse(
-                                    "discretization",
-                                    format!("a {type_name}'s type: {e:?}"),
-                                    at(),
-                                )
-                            })?;
+                    let key = rumoca_core::TypeId::new(m.effective_types.keys().map(|k| k.0).filter(|k| *k != u32::MAX).max().unwrap_or(0) + 1);
+                    let e = rumoca_core::EffectiveType::new(canonical, canonical, Vec::<i64>::new()).map_err(|e| refuse("discretization", format!("a {type_name}'s type: {e:?}"), at()))?;
                     m.effective_types.insert(key, e);
                     key
                 }
@@ -1145,18 +706,11 @@ pub fn explicit_euler(model: &flat::Model, period: f64) -> Result<flat::Model, T
             v.is_protected = true;
             v.instance_id = fresh_id();
             m.variables.insert(v.name.clone(), v);
-            m.variable_type_names
-                .insert(VarName::new(name.clone()), type_name.to_string());
+            m.variable_type_names.insert(VarName::new(name.clone()), type_name.to_string());
         }
     }
     if !added.tick.is_empty() {
-        let mut branch = flat::WhenBranch::new(
-            builtin(
-                BuiltinFunction::Sample,
-                vec![literal(Literal::Integer(0)), literal(Literal::Real(period))],
-            ),
-            at(),
-        );
+        let mut branch = flat::WhenBranch::new(builtin(BuiltinFunction::Sample, vec![literal(Literal::Integer(0)), literal(Literal::Real(period))]), at());
         branch.equations = added.tick;
         m.when_chains.push(flat::WhenChain::new(branch, at()));
     }
