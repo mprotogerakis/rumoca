@@ -41,7 +41,12 @@ impl SolveMeKernel {
         {
             self.apply_event_right_limit(event_time, right_time, event)?;
             Some(right_time)
-        } else if event.relation_right_limit && right_time > event_time {
+        } else if event.relation_right_limit
+            && !self.state_time_coincidence.is_consumed()
+            && right_time > event_time
+        {
+            // (Not where a root is found again at an instant whose scheduled
+            // events are done already: the relation was read then.)
             // The instant's own event is done: the clock ticked at the instant.
             // A scheduled time event shares it; its relation (`time > c`) is
             // false at the instant itself and is read past it now, as that
