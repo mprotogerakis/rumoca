@@ -1624,70 +1624,148 @@ type TerminateSplit = (
     Vec<Vec<ast::EquationBlock>>,
 );
 
-/// The `terminate(..)` calls that stand directly in an if-equation's
-/// branches, each as the one block of a when-equation on the condition its
-/// branch holds under (its own, and none before it), and the if-equation
-/// without them. None: no branch has one.
-fn split_branch_terminates(
-    cond_blocks: &[ast::EquationBlock],
-    else_block: &Option<Vec<ast::Equation>>,
-) -> Option<TerminateSplit> {
-    let has_terminate = |equations: &[ast::Equation]| equations.iter().any(is_terminate_call);
-    if !cond_blocks.iter().any(|block| has_terminate(&block.eqs))
-        && !else_block.as_deref().is_some_and(has_terminate)
-    {
-        return None;
-    }
-    let not = |condition: &ast::Expression| ast::Expression::Unary {
-        op: rumoca_core::OpUnary::Not,
-        rhs: Arc::new(condition.clone()),
-        span: condition.span(),
-    };
-    let and = |lhs: ast::Expression, rhs: ast::Expression| ast::Expression::Binary {
+fn has_branch_terminate(equations: &[ast::Equation]) -> bool {
+    equations.iter().any(|equation| match equation {
+        ast::Equation::If {
+            cond_blocks,
+            else_block,
+        } => {
+            cond_blocks
+                .iter()
+                .any(|block| has_branch_terminate(&block.eqs))
+                || else_block.as_deref().is_some_and(has_branch_terminate)
+        }
+        other => is_terminate_call(other),
+    })
+}
+
+fn and_expr(lhs: ast::Expression, rhs: ast::Expression) -> ast::Expression {
+    ast::Expression::Binary {
         op: rumoca_core::OpBinary::And,
         span: rhs.span(),
         lhs: Arc::new(lhs),
         rhs: Arc::new(rhs),
-    };
-    let mut whens = Vec::new();
-    // "No branch before this one holds."
-    let mut none_before: Option<ast::Expression> = None;
-    let mut rest_blocks = Vec::with_capacity(cond_blocks.len());
-    for block in cond_blocks {
-        let (terminates, rest): (Vec<_>, Vec<_>) =
-            block.eqs.iter().cloned().partition(is_terminate_call);
-        let holds = match &none_before {
-            None => block.cond.clone(),
-            Some(before) => and(before.clone(), block.cond.clone()),
-        };
-        for terminate in terminates {
-            whens.push(vec![ast::EquationBlock {
-                cond: holds.clone(),
-                eqs: vec![terminate],
-            }]);
-        }
-        none_before = Some(match none_before {
-            None => not(&block.cond),
-            Some(before) => and(before, not(&block.cond)),
-        });
-        rest_blocks.push(ast::EquationBlock {
-            cond: block.cond.clone(),
-            eqs: rest,
-        });
     }
-    let rest_else = else_block.as_ref().map(|equations| {
-        let (terminates, rest): (Vec<_>, Vec<_>) =
-            equations.iter().cloned().partition(is_terminate_call);
-        if let Some(holds) = &none_before {
-            for terminate in terminates {
+}
+
+fn not_expr(condition: &ast::Expression) -> ast::Expression {
+    ast::Expression::Unary {
+        op: rumoca_core::OpUnary::Not,
+        rhs: Arc::new(condition.clone()),
+        span: condition.span(),
+    }
+}
+
+/// `initial()`, spelled where `call` (a terminate) stands.
+fn initial_call(call: &ast::Equation) -> Option<ast::Expression> {
+    let ast::Equation::FunctionCall { comp, span, .. } = call else {
+        return None;
+    };
+    let mut initial = comp.clone();
+    let part = initial.parts.first_mut()?;
+    part.ident.text = Arc::from("initial");
+    part.def_id = None;
+    initial.qualified_display_name = None;
+    Some(ast::Expression::FunctionCall {
+        comp: initial,
+        args: Vec::new(),
+        is_partial_application: false,
+        span: *span,
+    })
+}
+
+/// `equations` without their `terminate(..)` calls, those of the
+/// if-equations nested in them too; each call as when-equations on `holds`
+/// (the condition these equations hold under) and what its own branches add:
+/// one where the condition comes to hold, one where it holds from the start
+/// (a when-equation's condition that is true at initialization has no edge).
+fn take_branch_terminates(
+    equations: &[ast::Equation],
+    holds: &ast::Expression,
+    whens: &mut Vec<Vec<ast::EquationBlock>>,
+) -> Vec<ast::Equation> {
+    let mut rest = Vec::with_capacity(equations.len());
+    for equation in equations {
+        match equation {
+            ast::Equation::If {
+                cond_blocks,
+                else_block,
+            } if has_branch_terminate(std::slice::from_ref(equation)) => {
+                let (cond_blocks, else_block) =
+                    split_if_terminates(cond_blocks, else_block, Some(holds), whens);
+                rest.push(ast::Equation::If {
+                    cond_blocks,
+                    else_block,
+                });
+            }
+            call if is_terminate_call(call) => {
                 whens.push(vec![ast::EquationBlock {
                     cond: holds.clone(),
-                    eqs: vec![terminate],
+                    eqs: vec![call.clone()],
                 }]);
+                if let Some(initial) = initial_call(call) {
+                    whens.push(vec![ast::EquationBlock {
+                        cond: and_expr(initial, holds.clone()),
+                        eqs: vec![call.clone()],
+                    }]);
+                }
             }
+            other => rest.push(other.clone()),
         }
-        rest
+    }
+    rest
+}
+
+/// An if-equation without the `terminate(..)` calls of its branches, see
+/// [take_branch_terminates]; a branch holds under `guard` (what the
+/// if-equation itself stands under), its own condition, and none before it.
+fn split_if_terminates(
+    cond_blocks: &[ast::EquationBlock],
+    else_block: &Option<Vec<ast::Equation>>,
+    guard: Option<&ast::Expression>,
+    whens: &mut Vec<Vec<ast::EquationBlock>>,
+) -> (Vec<ast::EquationBlock>, Option<Vec<ast::Equation>>) {
+    // "Under the guard, and no branch before this one holds."
+    let mut before: Option<ast::Expression> = guard.cloned();
+    let mut rest_blocks = Vec::with_capacity(cond_blocks.len());
+    for block in cond_blocks {
+        let holds = match &before {
+            None => block.cond.clone(),
+            Some(before) => and_expr(before.clone(), block.cond.clone()),
+        };
+        rest_blocks.push(ast::EquationBlock {
+            cond: block.cond.clone(),
+            eqs: take_branch_terminates(&block.eqs, &holds, whens),
+        });
+        before = Some(match before {
+            None => not_expr(&block.cond),
+            Some(before) => and_expr(before, not_expr(&block.cond)),
+        });
+    }
+    let rest_else = else_block.as_ref().map(|equations| match &before {
+        Some(holds) => take_branch_terminates(equations, holds, whens),
+        None => equations.clone(),
     });
+    (rest_blocks, rest_else)
+}
+
+/// The `terminate(..)` calls in an if-equation's branches, nested
+/// if-equations' too, each as the one block of a when-equation on the
+/// condition its branch holds under, and the if-equation without them. None:
+/// no branch has one.
+fn split_branch_terminates(
+    cond_blocks: &[ast::EquationBlock],
+    else_block: &Option<Vec<ast::Equation>>,
+) -> Option<TerminateSplit> {
+    if !cond_blocks
+        .iter()
+        .any(|block| has_branch_terminate(&block.eqs))
+        && !else_block.as_deref().is_some_and(has_branch_terminate)
+    {
+        return None;
+    }
+    let mut whens = Vec::new();
+    let (rest_blocks, rest_else) = split_if_terminates(cond_blocks, else_block, None, &mut whens);
     Some((rest_blocks, rest_else, whens))
 }
 
