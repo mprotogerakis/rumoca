@@ -2,7 +2,7 @@
 
 use super::{
     MeError, SolveMeKernel, advance_states_to_event_probe, event_right_limit_state_derivatives,
-    event_update_application_time,
+    event_update_application_time, StateTimeCoincidence,
 };
 use crate::{
     runtime::{
@@ -46,11 +46,26 @@ impl SolveMeKernel {
             // A scheduled time event shares it; its relation (`time > c`) is
             // false at the instant itself and is read past it now, as that
             // event alone would be (MLS 3.7 §8.5: every event of an instant).
-            self.apply_event_right_limit(
+            // The tick's own rows and actions ran at the instant and stay as
+            // they are, its reinitializations too: this pass is an event
+            // after the tick's. It enters from what the tick committed (no
+            // entry snapshot of the tick's to go back to) and settles what no
+            // clock owns.
+            let entry_y = self.boundary_event_pre_y.take();
+            let entry_p = self.boundary_event_pre_p.take();
+            let coincidence = std::mem::replace(
+                &mut self.state_time_coincidence,
+                StateTimeCoincidence::Unconsumed,
+            );
+            let applied = self.apply_event_right_limit(
                 event_time,
                 right_time,
                 RuntimeEventStop::static_event(EventPreMode::FollowCurrent),
-            )?;
+            );
+            self.state_time_coincidence = coincidence;
+            self.boundary_event_pre_y = entry_y;
+            self.boundary_event_pre_p = entry_p;
+            applied?;
             Some(right_time)
         } else {
             None
