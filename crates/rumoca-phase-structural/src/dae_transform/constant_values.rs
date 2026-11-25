@@ -328,7 +328,9 @@ pub(super) fn literal_binding_plan(view: dae::DaeView<'_>) -> LiteralPlan {
                 slot.clone_from(&discrete[dae::VariableId::from(variable).index() as usize]);
                 continue;
             }
-            dae::ExpressionOperation::Index { base, subscripts } if node.function_scope().is_none() => {
+            dae::ExpressionOperation::Index { base, subscripts }
+                if node.function_scope().is_none() =>
+            {
                 *slot = discrete_element(view, &discrete, base, subscripts);
                 continue;
             }

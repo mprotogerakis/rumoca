@@ -79,10 +79,7 @@ impl SolveStopSchedule {
             );
         }
         if let Some(event) = next {
-            return (
-                event.time,
-                Some(event.runtime_stop()),
-            );
+            return (event.time, Some(event.runtime_stop()));
         }
         (t_target, None)
     }

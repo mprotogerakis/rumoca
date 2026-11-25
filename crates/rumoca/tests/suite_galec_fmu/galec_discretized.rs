@@ -43,12 +43,20 @@ end Plant;
 
 #[test]
 fn a_continuous_model_discretized_goes_through_the_galec_targets() {
-    let c = Compiler::new().model("Plant").compile_str_discretized(MODEL, "plant.mo", 0.1).unwrap_or_else(|e| panic!("{e}"));
+    let c = Compiler::new()
+        .model("Plant")
+        .compile_str_discretized(MODEL, "plant.mo", 0.1)
+        .unwrap_or_else(|e| panic!("{e}"));
     for target in ["galec", "embedded-c-galec"] {
-        let files = render_target_files(&c, "Plant", target, None).unwrap_or_else(|e| panic!("{target}: {e:#}"));
+        let files = render_target_files(&c, "Plant", target, None)
+            .unwrap_or_else(|e| panic!("{target}: {e:#}"));
         assert!(!files.is_empty(), "{target}");
         if target == "galec" {
-            let alg = &files.iter().find(|f| f.path.ends_with(".alg")).unwrap().content;
+            let alg = &files
+                .iter()
+                .find(|f| f.path.ends_with(".alg"))
+                .unwrap()
+                .content;
             if std::env::var_os("SHOW_ALG").is_some() {
                 println!("{alg}");
             }
