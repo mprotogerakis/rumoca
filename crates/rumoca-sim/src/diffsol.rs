@@ -376,6 +376,11 @@ impl SimulationSession {
         self.inner.time()
     }
 
+    /// The `terminate(..)` that ended this session's run, if one did.
+    pub(crate) fn termination(&self) -> Option<rumoca_solver::SimTermination> {
+        self.inner.termination()
+    }
+
     pub(crate) fn get(&self, name: &str) -> Result<Option<f64>, SimError> {
         self.inner.get(name)
     }
