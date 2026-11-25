@@ -154,6 +154,18 @@ impl SimulationSession {
         }
     }
 
+    /// The `terminate(..)` that ended this session's run, if one did (MLS
+    /// §8.3.8): its time and message. A terminated session stays where it
+    /// ended; advancing it further does nothing.
+    pub fn termination(&self) -> Option<rumoca_solver::SimTermination> {
+        match &self.inner {
+            #[cfg(feature = "solver-diffsol")]
+            SimulationSessionInner::Diffsol(session) => session.termination(),
+            #[cfg(feature = "solver-rk45")]
+            SimulationSessionInner::RkLike(session) => session.termination(),
+        }
+    }
+
     pub fn get(&self, name: &str) -> Result<Option<f64>, SimulationDiagnosticError> {
         match &self.inner {
             #[cfg(feature = "solver-diffsol")]

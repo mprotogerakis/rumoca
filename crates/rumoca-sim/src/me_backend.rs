@@ -81,6 +81,15 @@ impl BackendSimulationSession {
             opts.max_wall_seconds,
         )?;
         let host = retained.into_lease(options)?;
+        // A model that ends its run at initialization (MLS §8.3.8) has no
+        // session to step: said as that, not as the contract a later call
+        // on the terminated host would break.
+        if let Some(termination) = host.termination() {
+            return Err(SimError::Terminated {
+                time: termination.time,
+                message: termination.message.clone(),
+            });
+        }
         let variable_names = host.output_names()?;
         let plugin = plugin_for_host(&host, opts, integrator)?;
         let session = host.into_session(plugin)?;
@@ -121,6 +130,11 @@ impl BackendSimulationSession {
 
     pub(crate) fn time(&self) -> f64 {
         self.session.time()
+    }
+
+    /// The `terminate(..)` that ended this session's run, if one did.
+    pub(crate) fn termination(&self) -> Option<rumoca_solver::SimTermination> {
+        self.session.termination().cloned()
     }
 
     pub(crate) fn get(&self, name: &str) -> Result<Option<f64>, SimError> {
