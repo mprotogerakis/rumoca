@@ -119,3 +119,55 @@ end Once;
         last("k")
     );
 }
+
+/// A tick that terminates the simulation ends it: the relation that crosses
+/// at the same instant is not read past it, and what it would set off there
+/// (a print of its own) does not happen.
+#[test]
+fn a_terminating_tick_is_not_followed_by_the_relation_s_pass() {
+    let source = r#"
+package Streams
+  impure function print
+    input String string = "";
+    input String fileName = "";
+  external "C" ModelicaInternal_print(string, fileName);
+  end print;
+end Streams;
+
+model Ends
+  Real x(start = 0, fixed = true);
+  Boolean b;
+equation
+  b = time > 0.5;
+  der(x) = 1;
+  when sample(0.5, 0.5) then
+    terminate("done at the tick");
+  end when;
+algorithm
+  when b then
+    Streams.print("past the tick");
+  end when;
+end Ends;
+"#;
+    let compiled = Compiler::new()
+        .model("Ends")
+        .compile_str(source, "ends.mo")
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    let result = simulate_dae_with_diagnostics(
+        &compiled.dae,
+        &SimOptions {
+            t_end: 1.0,
+            dt: Some(0.125),
+            ..SimOptions::default()
+        },
+    )
+    .expect("the model simulates to its termination");
+    let prints = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "WX002")
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    let end = *result.times.last().expect("a sample");
+    assert!(prints.is_empty() && (end - 0.5).abs() < 1e-9, "prints {prints:?}, ended at {end}");
+}
