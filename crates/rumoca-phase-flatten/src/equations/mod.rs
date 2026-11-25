@@ -1495,6 +1495,26 @@ fn expand_if_equation(
         return Ok(FlattenedEquations::default());
     }
 
+    // MLS §8.3.8: `terminate(..)` in a branch ends the simulation where the
+    // branch comes to hold. A branch's equations become conditional
+    // residuals, which a call without a result is none of: it was left out
+    // without a word and the run went on. It is an event of its own, a
+    // when-equation on the branch's condition; the rest is the if-equation
+    // it was.
+    if let Some((rest_blocks, rest_else, whens)) = split_branch_terminates(cond_blocks, else_block)
+    {
+        let mut flattened =
+            expand_if_equation(ctx, &rest_blocks, &rest_else, prefix, span, origin, def_map)?;
+        for blocks in whens {
+            flattened
+                .when_chains
+                .push(crate::when_equations::flatten_when_blocks(
+                    ctx, &blocks, prefix, span, def_map,
+                )?);
+        }
+        return Ok(flattened);
+    }
+
     // First, try to evaluate constant conditions at compile time
     // This handles cases like "if false then ... else ... end if"
     // and parameter-dependent conditions that can be resolved
@@ -1591,6 +1611,84 @@ fn expand_if_equation(
             def_map,
         )
     }
+}
+
+fn is_terminate_call(equation: &ast::Equation) -> bool {
+    matches!(equation, ast::Equation::FunctionCall { comp, .. }
+        if comp.parts.len() == 1 && comp.parts[0].ident.text.as_ref() == "terminate")
+}
+
+type TerminateSplit = (
+    Vec<ast::EquationBlock>,
+    Option<Vec<ast::Equation>>,
+    Vec<Vec<ast::EquationBlock>>,
+);
+
+/// The `terminate(..)` calls that stand directly in an if-equation's
+/// branches, each as the one block of a when-equation on the condition its
+/// branch holds under (its own, and none before it), and the if-equation
+/// without them. None: no branch has one.
+fn split_branch_terminates(
+    cond_blocks: &[ast::EquationBlock],
+    else_block: &Option<Vec<ast::Equation>>,
+) -> Option<TerminateSplit> {
+    let has_terminate = |equations: &[ast::Equation]| equations.iter().any(is_terminate_call);
+    if !cond_blocks.iter().any(|block| has_terminate(&block.eqs))
+        && !else_block.as_deref().is_some_and(has_terminate)
+    {
+        return None;
+    }
+    let not = |condition: &ast::Expression| ast::Expression::Unary {
+        op: rumoca_core::OpUnary::Not,
+        rhs: Arc::new(condition.clone()),
+        span: condition.span(),
+    };
+    let and = |lhs: ast::Expression, rhs: ast::Expression| ast::Expression::Binary {
+        op: rumoca_core::OpBinary::And,
+        span: rhs.span(),
+        lhs: Arc::new(lhs),
+        rhs: Arc::new(rhs),
+    };
+    let mut whens = Vec::new();
+    // "No branch before this one holds."
+    let mut none_before: Option<ast::Expression> = None;
+    let mut rest_blocks = Vec::with_capacity(cond_blocks.len());
+    for block in cond_blocks {
+        let (terminates, rest): (Vec<_>, Vec<_>) =
+            block.eqs.iter().cloned().partition(is_terminate_call);
+        let holds = match &none_before {
+            None => block.cond.clone(),
+            Some(before) => and(before.clone(), block.cond.clone()),
+        };
+        for terminate in terminates {
+            whens.push(vec![ast::EquationBlock {
+                cond: holds.clone(),
+                eqs: vec![terminate],
+            }]);
+        }
+        none_before = Some(match none_before {
+            None => not(&block.cond),
+            Some(before) => and(before, not(&block.cond)),
+        });
+        rest_blocks.push(ast::EquationBlock {
+            cond: block.cond.clone(),
+            eqs: rest,
+        });
+    }
+    let rest_else = else_block.as_ref().map(|equations| {
+        let (terminates, rest): (Vec<_>, Vec<_>) =
+            equations.iter().cloned().partition(is_terminate_call);
+        if let Some(holds) = &none_before {
+            for terminate in terminates {
+                whens.push(vec![ast::EquationBlock {
+                    cond: holds.clone(),
+                    eqs: vec![terminate],
+                }]);
+            }
+        }
+        rest
+    });
+    Some((rest_blocks, rest_else, whens))
 }
 
 /// Try to select a branch based on constant condition evaluation.
