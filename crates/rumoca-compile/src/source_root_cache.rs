@@ -414,6 +414,122 @@ fn load_source_root_documents_from_artifact_cache(
     ))
 }
 
+const SOURCE_ROOT_BUNDLE_DIR: &str = "bundles";
+const SOURCE_ROOT_BUNDLE_MAGIC: &[u8; 8] = b"rumocaB1";
+
+/// A source root's parsed documents in one file, and what tells that its sources are as they were
+/// without opening them: loading a root of thousands of files then opens one file and writes none
+/// (a virus scanner that looks at each file a process opens or writes makes a load from the
+/// per-file cache many times slower than the parse it saves).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SourceRootBundleHeader {
+    /// the root's files by path, size and modification time, with the compiler's version
+    fingerprint: [u8; 32],
+    /// the root's key by its sources' content, as a load without the bundle gives it
+    cache_key: String,
+    /// each document's length in the file, in their order after this header
+    lengths: Vec<u64>,
+}
+
+/// The bundle file of a source root (one per root: a root that changed replaces its own) and the
+/// fingerprint its sources have now; none where a file's size or time cannot be read.
+fn source_root_bundle(
+    cache_dir: &Path,
+    path: &Path,
+    files: &[PathBuf],
+) -> Option<(PathBuf, [u8; 32])> {
+    let compiler = source_root_cache_compiler_version().ok()?;
+    let canonical_root = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(format!("bundle-schema={SOURCE_ROOT_CACHE_SCHEMA_VERSION}\n").as_bytes());
+    hasher.update(format!("compiler={compiler}\n").as_bytes());
+    hasher.update(canonical_root.to_string_lossy().as_bytes());
+    hasher.update(b"\n");
+    for file in files {
+        let meta = fs::metadata(file).ok()?;
+        let modified = meta
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        hasher.update(file.to_string_lossy().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(&meta.len().to_le_bytes());
+        hasher.update(&modified.to_le_bytes());
+    }
+    // (named by the root as it is given: the documents carry their paths so)
+    let name = blake3::hash(path.to_string_lossy().as_bytes()).to_hex();
+    let dir = cache_dir.join(SOURCE_ROOT_BUNDLE_DIR);
+    fs::create_dir_all(&dir).ok()?;
+    Some((
+        dir.join(format!("{}.bin", &name[..32])),
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
+/// The documents of a bundle whose fingerprint is `fingerprint`, with the root's content key.
+fn read_source_root_bundle(
+    file: &Path,
+    fingerprint: &[u8; 32],
+) -> Option<(String, Vec<(String, StoredDefinition)>)> {
+    let bytes = fs::read(file).ok()?;
+    let rest = bytes.strip_prefix(SOURCE_ROOT_BUNDLE_MAGIC)?;
+    let mut cursor = std::io::Cursor::new(rest);
+    let header: SourceRootBundleHeader = bincode::deserialize_from(&mut cursor).ok()?;
+    if &header.fingerprint != fingerprint {
+        return None;
+    }
+    let mut start = cursor.position() as usize;
+    let mut slices = Vec::with_capacity(header.lengths.len());
+    for length in &header.lengths {
+        let end = start.checked_add(usize::try_from(*length).ok()?)?;
+        slices.push(rest.get(start..end)?);
+        start = end;
+    }
+    let docs = slices
+        .par_iter()
+        .map(|slice| bincode::deserialize::<(String, StoredDefinition)>(slice).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some((header.cache_key, docs))
+}
+
+fn write_source_root_bundle(
+    file: &Path,
+    fingerprint: [u8; 32],
+    cache_key: &str,
+    docs: &[(String, StoredDefinition)],
+) -> Result<()> {
+    use std::io::Write;
+    let blobs = docs
+        .par_iter()
+        .map(bincode::serialize)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("serialize source-root bundle documents")?;
+    let header = SourceRootBundleHeader {
+        fingerprint,
+        cache_key: cache_key.to_string(),
+        lengths: blobs.iter().map(|blob| blob.len() as u64).collect(),
+    };
+    let tmp = file.with_extension(format!("{}.tmp", std::process::id()));
+    let mut out = std::io::BufWriter::new(
+        fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?,
+    );
+    out.write_all(SOURCE_ROOT_BUNDLE_MAGIC)?;
+    bincode::serialize_into(&mut out, &header).context("serialize source-root bundle header")?;
+    for blob in &blobs {
+        out.write_all(blob)?;
+    }
+    out.into_inner()
+        .map_err(|error| anyhow::anyhow!("flush {}: {error}", tmp.display()))?;
+    // (over the root's bundle of before; a reader that has that one open on Windows: next time)
+    if let Err(error) = fs::rename(&tmp, file) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("finalize {}", file.display()));
+    }
+    Ok(())
+}
+
 pub fn parse_source_root_with_cache_in(
     path: &Path,
     cache_dir: Option<&Path>,
@@ -426,12 +542,40 @@ pub fn parse_source_root_with_cache_in(
         .with_context(|| format!("collect .mo files under {}", path.display()))?;
     timing.collect_files_ms = elapsed_ms(collect_started);
 
+    // The root's bundle, when its sources are as the bundle saw them: one file read, none written.
+    let lookup_started = Instant::now();
+    let bundle = usable_cache_dir(cache_dir.map(Path::to_path_buf))
+        .and_then(|cache_dir| source_root_bundle(&cache_dir, path, &files));
+    let bundled = bundle
+        .as_ref()
+        .and_then(|(file, fingerprint)| read_source_root_bundle(file, fingerprint));
+    timing.cache_lookup_ms = elapsed_ms(lookup_started);
+    if let Some((cache_key, docs)) = bundled {
+        timing.cache_deserialize_ms = std::mem::take(&mut timing.cache_lookup_ms);
+        let validate_started = Instant::now();
+        validate_source_root_package_layout(path, &docs)?;
+        timing.validate_layout_ms = elapsed_ms(validate_started);
+        record_source_root_cache_result(SourceRootCacheStatus::Hit, 0);
+        timing.total_ms = elapsed_ms(total_started);
+        return Ok(ParsedSourceRoot {
+            documents: docs,
+            file_count: files.len(),
+            cache_status: SourceRootCacheStatus::Hit,
+            cache_key,
+            cache_file: bundle.map(|(file, _)| file),
+            timing,
+        });
+    }
+
     let hash_started = Instant::now();
     let input_hash = hash_source_root_inputs(path, &files)
         .with_context(|| format!("fingerprint {}", path.display()))?;
     timing.hash_inputs_ms = elapsed_ms(hash_started);
-    let parsed_artifact_cache_dir =
-        usable_cache_dir(resolve_parsed_artifact_cache_dir_from_root(cache_dir));
+    // (a root that has its bundle keeps no file of the cache per source file beside it)
+    let parsed_artifact_cache_dir = match bundle {
+        Some(_) => None,
+        None => usable_cache_dir(resolve_parsed_artifact_cache_dir_from_root(cache_dir)),
+    };
     let load_started = Instant::now();
     let (docs, all_hits) = load_source_root_documents_from_artifact_cache(
         &input_hash.files,
@@ -451,11 +595,21 @@ pub fn parse_source_root_with_cache_in(
     let validate_started = Instant::now();
     validate_source_root_package_layout(path, &docs)?;
     timing.validate_layout_ms = elapsed_ms(validate_started);
-    let cache_status = match (parsed_artifact_cache_dir.is_some(), all_hits) {
-        (true, true) => SourceRootCacheStatus::Hit,
-        (true, false) => SourceRootCacheStatus::Miss,
-        (false, _) => SourceRootCacheStatus::Disabled,
+    let cache_status = match (&bundle, parsed_artifact_cache_dir.is_some(), all_hits) {
+        (Some(_), _, _) => SourceRootCacheStatus::Miss,
+        (None, true, true) => SourceRootCacheStatus::Hit,
+        (None, true, false) => SourceRootCacheStatus::Miss,
+        (None, false, _) => SourceRootCacheStatus::Disabled,
     };
+    let mut cache_file = None;
+    if let Some((file, fingerprint)) = bundle {
+        let write_started = Instant::now();
+        // (not written: the next load parses again)
+        if write_source_root_bundle(&file, fingerprint, &input_hash.cache_key, &docs).is_ok() {
+            cache_file = Some(file);
+        }
+        timing.cache_write_ms = elapsed_ms(write_started);
+    }
     record_source_root_cache_result(
         cache_status,
         if cache_status == SourceRootCacheStatus::Hit {
@@ -474,7 +628,7 @@ pub fn parse_source_root_with_cache_in(
         file_count: files.len(),
         cache_status,
         cache_key: input_hash.cache_key,
-        cache_file: None,
+        cache_file,
         timing,
     })
 }
@@ -496,7 +650,6 @@ fn cache_prune_root_for_source_root_cache(cache_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_files_parallel_with_cache_statuses;
     use crate::source_roots::PackageLayoutError;
 
     #[test]
@@ -544,7 +697,19 @@ mod tests {
                     + second.timing.cache_deserialize_ms
                     + second.timing.validate_layout_ms
         );
-        assert!(second.cache_file.is_none());
+        // (from the root's one bundle file: no file per source file beside it)
+        let bundle = second.cache_file.expect("the bundle the second load read");
+        assert_eq!(first.cache_file.as_deref(), Some(bundle.as_path()));
+        assert_eq!(second.cache_key, first.cache_key);
+        assert_eq!(second.documents.len(), 1);
+        assert_eq!(second.documents[0].0, first.documents[0].0);
+        assert!(!cache_dir.join("parsed-files").exists());
+        assert_eq!(
+            std::fs::read_dir(cache_dir.join(SOURCE_ROOT_BUNDLE_DIR))
+                .expect("bundles")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -692,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn source_root_miss_reuses_unchanged_parsed_file_artifacts() {
+    fn source_root_bundle_is_replaced_when_a_file_changes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let lib_dir = temp.path().join("Lib");
         let cache_dir = temp.path().join("cache");
@@ -717,23 +882,30 @@ mod tests {
             "within Lib;\nmodel B\n  Real y;\n  Real z;\nend B;",
         )
         .expect("update B");
-        let parsed_artifact_cache_dir =
-            resolve_parsed_artifact_cache_dir_from_root(Some(&cache_dir))
-                .expect("parsed artifact cache dir");
-        let files = [lib_dir.join("package.mo"), lib_dir.join("B.mo")];
-        let statuses =
-            parse_files_parallel_with_cache_statuses(&files, Some(&parsed_artifact_cache_dir))
-                .expect("parse with statuses");
+        let changed =
+            parse_source_root_with_cache_in(&lib_dir, Some(&cache_dir)).expect("changed parse");
+        assert_eq!(changed.cache_status, SourceRootCacheStatus::Miss);
+        assert_ne!(changed.cache_key, first.cache_key);
+        let again =
+            parse_source_root_with_cache_in(&lib_dir, Some(&cache_dir)).expect("third parse");
+        assert_eq!(again.cache_status, SourceRootCacheStatus::Hit);
+        assert_eq!(again.cache_key, changed.cache_key);
+        assert_eq!(again.documents.len(), 2);
+        // (one bundle for the root, the changed one in the place of the first)
         assert_eq!(
-            statuses
-                .iter()
-                .map(|(_, _, status)| *status)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::parsed_artifact_cache::ParsedArtifactCacheStatus::Hit,
-                crate::parsed_artifact_cache::ParsedArtifactCacheStatus::Miss
-            ],
-            "the changed source-root file should be reparsed while unchanged files reuse cached ASTs"
+            std::fs::read_dir(cache_dir.join(SOURCE_ROOT_BUNDLE_DIR))
+                .expect("bundles")
+                .count(),
+            1
         );
+
+        // (a bundle cut short or of another fingerprint: parsed anew)
+        let bundle = again.cache_file.expect("bundle");
+        let bytes = std::fs::read(&bundle).expect("read bundle");
+        std::fs::write(&bundle, &bytes[..bytes.len() / 2]).expect("truncate bundle");
+        let repaired =
+            parse_source_root_with_cache_in(&lib_dir, Some(&cache_dir)).expect("fourth parse");
+        assert_eq!(repaired.cache_status, SourceRootCacheStatus::Miss);
+        assert_eq!(repaired.documents.len(), 2);
     }
 }
