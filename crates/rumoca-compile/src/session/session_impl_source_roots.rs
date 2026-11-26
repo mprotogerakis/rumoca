@@ -343,6 +343,16 @@ impl Session {
         self.source_root_indexing.loaded_path_keys.clone()
     }
 
+    /// Record that the source root at `path_key` (its canonical path) is in the session, loaded by
+    /// its host: [`Self::required_source_root_load_plan`] then leaves it out, and a session kept
+    /// between compiles reads its libraries once. The host answers for a root that changes on
+    /// disk meanwhile (it loads it again, or makes a new session).
+    pub fn mark_source_root_path_loaded(&mut self, path_key: &str) {
+        self.source_root_indexing
+            .loaded_path_keys
+            .insert(path_key.to_string());
+    }
+
     pub fn is_source_root_path_loaded(&self, path_key: &str) -> bool {
         self.source_root_indexing
             .loaded_path_keys

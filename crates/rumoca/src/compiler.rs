@@ -385,6 +385,9 @@ impl Compiler {
             path_obj,
             cache_dir.as_deref(),
         );
+        // (a compile in a session kept from an earlier one finds the root there: it was read
+        // again at every compile, a library of thousands of files with it)
+        session.mark_source_root_path_loaded(&canonical_path_key(path));
 
         if self.verbose
             && let Some(status) = session.source_root_status(&source_root_key)
@@ -1476,6 +1479,40 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn test_kept_session_reads_a_source_root_once() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("lib");
+        write_source_root_library(&root);
+        let root_str = root.to_string_lossy().to_string();
+        let roots = vec![root_str.clone()];
+        let compiler = Compiler::new().model("Probe").source_root(&root_str);
+        let source = "model Probe\n  Pkg.Sub.Helper h;\nend Probe;\n";
+        let mut session = Session::new(SessionConfig::default());
+        assert_eq!(
+            session
+                .required_source_root_load_plan(source, &roots, &HashSet::new())
+                .load_paths,
+            roots
+        );
+        compiler
+            .compile_str_in(&mut session, source, "Probe.mo")
+            .expect("first compile");
+
+        // The session has the root now: a second compile in it, of an edited
+        // text, plans no load (it read the whole root again at every compile).
+        let edited = "model Probe\n  Pkg.Sub.Helper h;\n  Real y = 2;\nend Probe;\n";
+        assert!(
+            session
+                .required_source_root_load_plan(edited, &roots, &HashSet::new())
+                .load_paths
+                .is_empty()
+        );
+        compiler
+            .compile_str_in(&mut session, edited, "Probe.mo")
+            .expect("second compile in the kept session");
     }
 
     #[test]
