@@ -345,6 +345,16 @@ pub fn parse_to_ast_with_errors(
 /// the syntax boundary never fails. Failures are carried in the returned value,
 /// alongside a best-effort recovered tree for editor-facing queries.
 pub fn parse_to_syntax(source: &str, file_name: &str) -> SyntaxFile {
+    // MLS §13.4.2: a stored file may begin with the UTF-8 byte order mark. Read
+    // as three spaces: no token, and every byte offset stays the file's.
+    let without_bom;
+    let source = match source.strip_prefix('\u{feff}') {
+        Some(rest) => {
+            without_bom = format!("   {rest}");
+            without_bom.as_str()
+        }
+        None => source,
+    };
     match parse_once_to_ast(source, file_name) {
         Ok(parsed) => SyntaxFile::from_parsed(parsed),
         Err(initial_errors) => {
@@ -613,6 +623,18 @@ mod tests {
     use super::*;
     use rumoca_ir_ast as ast;
     use rumoca_ir_ast::{Import, TerminalType};
+
+    #[test]
+    fn a_file_may_begin_with_the_utf8_byte_order_mark() {
+        let plain = "within P;\nmodel A\n  Real x = 1;\nend A;\n";
+        let with_bom = format!("\u{feff}{plain}");
+        let a = parse_to_ast(&with_bom, "A.mo").expect("a byte order mark is no token");
+        let b = parse_to_ast(plain, "A.mo").expect("plain");
+        assert!(a.classes.contains_key("A") && b.classes.contains_key("A"));
+        // every place keeps the file's byte offset: three bytes after the plain text's
+        let at = |d: &ast::StoredDefinition| d.classes["A"].name.location.start;
+        assert_eq!(at(&a), at(&b) + 3);
+    }
 
     fn round_trip_ast(source: &str) -> rumoca_ir_ast::StoredDefinition {
         let ast = parse_to_ast(source, "test.mo").expect("initial parse should succeed");
