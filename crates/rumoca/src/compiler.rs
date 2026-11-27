@@ -369,7 +369,7 @@ impl Compiler {
                     source_map: Box::new(package_layout_error.source_map().clone()),
                 };
             }
-            CompilerError::ParseError(format!("{}: {}", path, e))
+            CompilerError::ParseError(format!("{}: {:#}", path, e))
         })?;
 
         let source_root_key = source_root_source_set_key(path);
