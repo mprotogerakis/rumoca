@@ -197,9 +197,37 @@ impl ScalarExecutionView<'_> {
         // the start point is committed below, the same refresh reads the
         // committed history, so the first event iteration of the transient
         // analysis sees the initialization value.
+        // MLS §8.6: the initial equations hold together with the equations of
+        // a `when initial()`. The projection before this boundary held every
+        // discrete its rows read at the value it had then; a `when` body that
+        // runs here, while `initial()` is true, may set one (`u0 = level`), so
+        // a `fixed = false` parameter or a free state an initial equation
+        // defines from it (`p0 = u0 + ..`) is projected again from the values
+        // this pass left, whenever they moved since the last projection.
+        let holds_discretes = self
+            .model
+            .problem
+            .initialization
+            .projection_plan()
+            .iterates_discretes;
+        let mut projected_from = holds_discretes
+            .then(|| copy_runtime_values(p, "initialization projection inputs"))
+            .transpose()?;
         let mut project_algebraics = |y: &mut [f64], p: &mut [f64], t: f64| {
+            let mut reprojected = false;
+            if let Some(from) = projected_from.as_mut()
+                && self.initial_event_flag(p)
+                && crate::runtime_values_changed(from, p, tol)
+            {
+                let before_y = copy_runtime_values(y, "initialization projection y")?;
+                from.copy_from_slice(p);
+                self.project_initial_variables(y, p, t, tol, max_iters)?;
+                reprojected = crate::runtime_values_changed(&before_y, y, tol)
+                    || crate::runtime_values_changed(from, p, tol);
+                from.copy_from_slice(p);
+            }
             let projected = project_algebraics(y, p, t)?;
-            Ok(self.refresh_initial_delay_identity(t, y, p, tol)? | projected)
+            Ok(self.refresh_initial_delay_identity(t, y, p, tol)? | projected | reprojected)
         };
         // Modelica assertions and termination equations are active during
         // initialization even when no clock, relation, or scheduled event
