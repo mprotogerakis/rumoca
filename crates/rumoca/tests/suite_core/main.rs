@@ -95,6 +95,7 @@ mod constant_values;
 mod constraint_fold_charts;
 mod coupled_refresh_schedule;
 mod dead_derivative_arms;
+mod delay_before_a_state_event;
 mod delay_event_jumps;
 mod delay_initial_values;
 mod delay_stepped_session;

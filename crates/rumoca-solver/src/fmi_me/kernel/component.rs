@@ -1261,7 +1261,7 @@ impl SolveMeKernel {
     }
 
     pub(super) fn commit_delay_point(&mut self) -> Result<(), MeError> {
-        self.commit_delay_point_recorded_at(self.time)
+        self.commit_delay_point_recorded_at(self.time, false)
     }
 
     /// Commit the delay sources settled at `self.time` as the history point
@@ -1272,7 +1272,19 @@ impl SolveMeKernel {
     /// superdense right limit) is where the sources are read, not a history
     /// time: two history points an ulp apart would enter the interpolation
     /// stencil with weights of order 1/ulp.
-    fn commit_delay_point_recorded_at(&mut self, recorded_time: f64) -> Result<(), MeError> {
+    ///
+    /// `event` says that the commit is an event's. An event located by a
+    /// root settles at its instant itself, so the two times do not tell it
+    /// from a step's commit; its unchanged right limit must still leave the
+    /// pair, or the stencil crosses the kink the event put into a source's
+    /// slope (a lag whose input a two-point controller switches) and reads
+    /// the whole last step before the event off a cubic bent to the slope
+    /// after it.
+    fn commit_delay_point_recorded_at(
+        &mut self,
+        recorded_time: f64,
+        event: bool,
+    ) -> Result<(), MeError> {
         if !self.runtime.has_delay_channels() {
             return Ok(());
         }
@@ -1329,7 +1341,7 @@ impl SolveMeKernel {
                 left_y,
                 &self.params,
             )?;
-        } else if recorded_time.to_bits() == self.time.to_bits() {
+        } else if !event && recorded_time.to_bits() == self.time.to_bits() {
             self.runtime
                 .commit_delay_history(self.time, &solver_y, &self.params)?;
         } else {
@@ -1587,7 +1599,7 @@ impl SolveMeKernel {
         self.invalidate_continuous_linearization();
         self.cache_algebraic_coordinate(event_time, &self.states, &self.params, &solver_y);
         *self.solver_y_guess.borrow_mut() = solver_y;
-        self.commit_delay_point_recorded_at(history_time)?;
+        self.commit_delay_point_recorded_at(history_time, true)?;
         Ok(())
     }
 

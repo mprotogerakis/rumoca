@@ -713,7 +713,9 @@ fn delayed_value(
     let Some(first) = points.first().copied() else {
         return current_source;
     };
-    if query_time <= first.time {
+    // (Strictly before: at the first point's own time the walk below reads
+    // the right limit of a pair that pruning left at the head.)
+    if query_time < first.time {
         return first.value;
     }
     let upper = points.partition_point(|point| point.time <= query_time);
@@ -943,7 +945,10 @@ fn delay_root_interval_sign(channel: &DelayChannelHistory, interval: usize) -> f
 fn prune_history(channel: &mut DelayChannelHistory, time: f64) {
     let keep_after = time - channel.delay_max;
     let first_after = active_points(channel).partition_point(|point| point.time < keep_after);
-    let consumed_points = first_after.saturating_sub(1);
+    // The point before the oldest query brackets it; the one before that is
+    // the smooth stencil's left neighbour, its only third point where the
+    // bracket ends on an event's pair.
+    let consumed_points = first_after.saturating_sub(2);
     if consumed_points > 0 {
         channel.points_head += consumed_points;
         compact_consumed_prefix(&mut channel.points, &mut channel.points_head);
@@ -1365,7 +1370,9 @@ mod tests {
             suppressed_discontinuity: None,
         };
 
-        prune_history(&mut channel, 200.0);
+        // Queries from 3.0 on: the bracketing point 2.0 and the stencil's
+        // left neighbour 1.0 stay.
+        prune_history(&mut channel, 201.0);
 
         assert_eq!(channel.points_head, 1);
         assert_eq!(channel.points.len(), 200);
