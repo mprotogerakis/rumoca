@@ -390,6 +390,7 @@ mod size_of_call_results;
 mod sliding_mode_events;
 mod smooth_index_reduction;
 mod solve_model_round_trip;
+mod source_step_at_a_sample_instant;
 mod state_demotion_through_alias;
 mod state_jacobian_sparsity;
 mod state_select_enclosing_constant_test;

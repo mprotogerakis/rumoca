@@ -1328,6 +1328,29 @@ impl ScalarExecutionView<'_> {
         project_algebraics: &mut ProjectAlgebraics<'_>,
     ) -> Result<bool, RuntimeSolveError> {
         let mut changed_any = false;
+        // MLS §8.5: the equations active at one event instant hold together.
+        // A tick's rows execute once, over the values their pass enters with;
+        // an unclocked equation that sets its target at the tick's own
+        // instant (`when time >= c`, a table's step) must have done so by
+        // then, or the tick reads the value of before the instant and its
+        // result is one period late. So what no clock owns settles first, as
+        // it does before the phase-zero tick of the initial event.
+        if snapshot.event_iteration == 0
+            && snapshot.row_filter == EventUpdateRowFilter::All
+            && self.clock_partition_ticks_at(input.t)?
+        {
+            let unowned = DiscretePreSnapshot {
+                row_filter: EventUpdateRowFilter::UnownedOnly,
+                root_relation_overrides: snapshot.root_relation_overrides,
+                event_iteration: 0,
+            };
+            for _ in 0..self.event_schedule().fixed_point_cap() {
+                if !self.run_settle_pass(&unowned, input, project_algebraics)? {
+                    break;
+                }
+                changed_any = true;
+            }
+        }
         for settle_iteration in 0..self.event_schedule().fixed_point_cap() {
             // A clocked equation executes once at its superdense tick. The
             // remaining passes settle unclocked equations and algebraic
